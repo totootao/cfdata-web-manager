@@ -1,0 +1,10 @@
+# 构建上下文排除项
+.git
+.github
+.gitignore
+results/
+config.json
+cfdata-config.json
+__pycache__/
+*.pyc
+README.md

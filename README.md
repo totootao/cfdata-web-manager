@@ -92,6 +92,34 @@ proxies:
         Host: edgetunnel-ekw.pages.dev
 ```
 
+## Docker 部署
+
+镜像推送到 Docker Hub：`totootao/cfdata-web-manager`（GitHub Actions 自动构建，`main` 分支更新即重新推送）。
+
+```bash
+docker run -d \
+  --name cfdata-web \
+  --restart unless-stopped \
+  -p 8088:8088 \
+  -v cfdata-results:/app/results \
+  -v cfdata-data:/app/data \
+  totootao/cfdata-web-manager:latest
+```
+
+| 挂载卷 | 说明 |
+| --- | --- |
+| `/app/results` | 测试结果（TXT/YAML/日志/运行记录） |
+| `/app/data` | 可选，持久化 `config.json` 等配置（配合 `-v cfdata-data:/app/data` 并设置环境变量时用于备份场景） |
+
+本地构建镜像：
+
+```bash
+docker build -t cfdata-web-manager .
+docker run -d -p 8088:8088 -v cfdata-results:/app/results cfdata-web-manager
+```
+
+> 镜像基于 `python:3.11-slim`，内置 cfdata-linux-amd64，仅支持 `linux/amd64` 平台。定时任务由应用内置 cron 调度器执行，容器需保持常驻运行。
+
 ## 等价命令
 
 平台的任务执行等价于对每个已启用源运行：
