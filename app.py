@@ -69,6 +69,7 @@ DEFAULT_CONFIG = {
         'threads': 100,             # -threads 扫描并发
         'ip_type': 'all',           # -nsbiptype
         'tls': True,                # -nsbtls
+        'skip_geo_check': True,     # -skipgeo 跳过代理/地区环境验证（服务器/Docker 无交互环境必须开启）
         'timeout_minutes': 0,       # 单个源超时(分钟), 0 = 不限制
         'node': {
             'name_template': '{dc}-{loc}-{speed}MB/s',
@@ -579,6 +580,7 @@ class TaskRunner:
             '-nsbqualified=%s' % ('true' if settings.get('qualified', True) else 'false'),
             '-nsbtls=%s' % ('true' if settings.get('tls', True) else 'false'),
             '-nsbiptype=%s' % settings.get('ip_type', 'all'),
+            '-skipgeo=%s' % ('true' if settings.get('skip_geo_check', True) else 'false'),
             '-format=csv',
             '-fields=%s' % CSV_FIELDS,
             '-nsbout=%s' % out_name,
@@ -588,9 +590,26 @@ class TaskRunner:
         log('%s 开始测试: %s' % (label, src['url']))
         started = time.time()
         proc = None
+        # 复用已缓存的 locations.json, 避免每次运行都重新下载数据中心位置信息
+        cached_locations = os.path.join(APP_DIR, 'locations.json')
+        if os.path.exists(cached_locations):
+            try:
+                shutil.copyfile(cached_locations, os.path.join(run_dir, 'locations.json'))
+            except Exception:
+                pass
+        strict_geo = not bool(settings.get('skip_geo_check', True))
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    cwd=run_dir, stdin=subprocess.DEVNULL)
+            # 严格模式下不给输入(交互确认将默认取消); 跳过模式下自动应答 y 作为兜底
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=run_dir,
+                stdin=subprocess.DEVNULL if strict_geo else subprocess.PIPE)
+            if not strict_geo:
+                try:
+                    proc.stdin.write(b'y\n')
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                except Exception:
+                    pass
             with self._lock:
                 self._proc = proc
             timeout = float(settings.get('timeout_minutes') or 0) * 60
@@ -602,6 +621,13 @@ class TaskRunner:
             if code != 0:
                 log('%s 进程退出码 %d' % (label, code))
             rows = self._parse_csv(out_path)
+            # 回写缓存 locations.json, 供后续运行复用(避免重复下载)
+            run_locations = os.path.join(run_dir, 'locations.json')
+            if os.path.exists(run_locations):
+                try:
+                    shutil.copyfile(run_locations, cached_locations)
+                except Exception:
+                    pass
             log('%s 完成: 耗时 %.1f 秒, 符合条件节点 %d 个' % (label, elapsed, len(rows)))
             return rows, {
                 'name': src['name'], 'url': src['url'], 'ok': True,

@@ -1,6 +1,7 @@
 # 运行时生成（含节点结果与个人配置，勿提交）
 config.json
 cfdata-config.json
+locations.json
 results/
 logs/
 

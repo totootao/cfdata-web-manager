@@ -135,14 +135,18 @@ docker run -d -p 8088:8088 -v cfdata-results:/app/results cfdata-web-manager
   -nsbqualified=true \
   -nsbtls=true \
   -nsbiptype all \
+  -skipgeo=true \
   -format csv \
   -fields ipport,latency,speed,dc,loc,region,city \
   -nsbout source_01.csv
 ```
 
+> `-skipgeo`：cfdata 启动时会检测是否处于代理/VPN 环境并交互式询问是否继续；服务器/Docker 等无交互环境中该检测常因无法识别网络标签而取消任务，平台默认传 `-skipgeo=true` 跳过（可在「参数设置」中关闭恢复严格检测）。
+
 ## 注意事项
 
 - cfdata 首次运行会生成 `cfdata-config.json`，平台启动时已自动预生成，无需手动处理
+- `locations.json`（数据中心位置信息）首次运行后自动缓存复用，无需每次重新下载
 - 测速线程数建议保持 5 以内，多 IP 并发会互相影响实际速度
 - 若 cfdata 未与本程序同目录，可在「参数设置」中指定二进制绝对路径
 - 本项目仅供网络研究与学习用途

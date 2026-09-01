@@ -222,6 +222,9 @@ footer{text-align:center;color:var(--dim);font-size:12px;margin-top:30px}
           <select id="sTls"><option value="true">是</option><option value="false">否</option></select></div>
         <div class="field"><label>仅导出达标结果 (-nsbqualified)</label>
           <select id="sQualified"><option value="true">是</option><option value="false">否</option></select></div>
+        <div class="field"><label>跳过代理环境检测 (-skipgeo)</label>
+          <select id="sSkipGeo"><option value="true">是（服务器/Docker 推荐）</option><option value="false">否（严格检测）</option></select>
+          <div class="hint">无交互环境下关闭检测会导致任务被取消</div></div>
       </div>
     </div>
     <div class="card">
@@ -440,6 +443,7 @@ async function loadSettings(){
     $('sThreads').value=s.threads; $('sIpType').value=s.ip_type; $('sTopN').value=s.top_n;
     $('sTimeout').value=s.timeout_minutes; $('sTls').value=String(!!s.tls);
     $('sQualified').value=String(!!s.qualified);
+    $('sSkipGeo').value=String(s.skip_geo_check!==false);
     $('nTemplate').value=n.name_template; $('nPassword').value=n.password;
     $('nSni').value=n.sni; $('nHost').value=n.host; $('nPath').value=n.path;
     $('nFp').value=n.client_fingerprint||'chrome'; $('nSkip').value=String(!!n.skip_cert_verify);
@@ -456,7 +460,7 @@ async function saveSettings(){
     speed_limit:+$('sSpeedLimit').value, result_limit:+$('sResultLimit').value,
     threads:+$('sThreads').value, ip_type:$('sIpType').value, top_n:+$('sTopN').value,
     timeout_minutes:+$('sTimeout').value, tls:$('sTls').value==='true',
-    qualified:$('sQualified').value==='true', binary_path:$('sBinary').value.trim(),
+    qualified:$('sQualified').value==='true', skip_geo_check:$('sSkipGeo').value==='true', binary_path:$('sBinary').value.trim(),
     node:{
       name_template:$('nTemplate').value.trim(), password:$('nPassword').value,
       sni:$('nSni').value.trim(), host:$('nHost').value.trim(), path:$('nPath').value,
