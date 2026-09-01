@@ -265,6 +265,8 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
         <div class="field"><label>IP 类型 (-nsbiptype)</label>
           <select id="sIpType"><option value="all">全部 (all)</option><option value="ipv4">仅 IPv4</option><option value="ipv6">仅 IPv6</option></select></div>
         <div class="field"><label>提取前 N 个节点</label><input type="number" id="sTopN" min="1" step="1"></div>
+        <div class="field"><label>分源提取最快前 N 个</label><input type="number" id="sPerSourceN" min="1" step="1">
+          <div class="hint">测速完成后每个源单独提取速度最快的前 N 个（默认 5），输出 top_by_source.txt</div></div>
         <div class="field"><label>单源超时(分钟, 0=不限)</label><input type="number" id="sTimeout" min="0" step="1"></div>
         <div class="field"><label>启用 TLS (-nsbtls)</label>
           <select id="sTls"><option value="true">是</option><option value="false">否</option></select></div>
@@ -310,7 +312,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     </div>
     <div class="card">
       <h2>历史运行结果</h2>
-      <div class="desc">每次任务完成后保存 Top 节点（TXT + Clash YAML 两种格式）与全量排序结果</div>
+      <div class="desc">每次任务完成后保存 Top 节点（TXT + Clash YAML 两种格式）、全量排序结果与各源最快节点（top_by_source.txt）</div>
       <div id="runsList"><div class="empty">暂无运行记录</div></div>
     </div>
     <div class="card" id="runDetailCard" style="display:none">
@@ -539,6 +541,7 @@ async function loadSettings(){
     $('sSpeedThreads').value=s.speedtest_threads; $('sSpeedMin').value=s.speed_min;
     $('sSpeedLimit').value=s.speed_limit; $('sResultLimit').value=s.result_limit;
     $('sThreads').value=s.threads; $('sIpType').value=s.ip_type; $('sTopN').value=s.top_n;
+    $('sPerSourceN').value=s.per_source_top_n??5;
     $('sTimeout').value=s.timeout_minutes; $('sTls').value=String(!!s.tls);
     $('sQualified').value=String(!!s.qualified);
     $('sSkipGeo').value=String(s.skip_geo_check!==false);
@@ -557,6 +560,7 @@ async function saveSettings(){
     speedtest_threads:+$('sSpeedThreads').value, speed_min:+$('sSpeedMin').value,
     speed_limit:+$('sSpeedLimit').value, result_limit:+$('sResultLimit').value,
     threads:+$('sThreads').value, ip_type:$('sIpType').value, top_n:+$('sTopN').value,
+    per_source_top_n:Math.max(1, +$('sPerSourceN').value||5),
     timeout_minutes:+$('sTimeout').value, tls:$('sTls').value==='true',
     qualified:$('sQualified').value==='true', skip_geo_check:$('sSkipGeo').value==='true', binary_path:$('sBinary').value.trim(),
     node:{
@@ -601,11 +605,12 @@ async function loadLatest(){
           ${ex.txt?`<a class="dl" href="/api/download/latest/top_nodes.txt">⬇ TXT</a>`:''}
           ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML</a>`:''}
           ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量</a>`:''}
+          ${ex.by_source?`<a class="dl" href="/api/download/latest/top_by_source.txt">⬇ 分源Top${d.per_source_count??5}</a>`:''}
           ${ex.yaml?`<a class="dl" onclick="copyText('${subYaml}','订阅链接')">📋 复制订阅链接</a>`:''}
           ${ex.txt?`<a class="dl" onclick="copyText('${subTxt}','TXT 链接')">📋 复制 TXT 链接</a>`:''}
         </div>
         <div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">
-          固定路径: results/latest/（${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt':''}）
+          固定路径: results/latest/（${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt ':''}${ex.by_source?'top_by_source.txt':''}）
         </div>
       </div>`;
   }catch(e){ /* 静默, 不打断历史列表 */ }
@@ -633,7 +638,8 @@ async function loadRuns(){
           <span>提取节点: <b style="color:var(--cyan)">${r.top_count??'-'}</b></span>
           ${r.files?`<a class="dl" href="/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT</a>
           <a class="dl" href="/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML</a>
-          <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量</a>`:''}
+          <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量</a>
+          ${r.files.by_source?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source}" onclick="event.stopPropagation()">⬇ 分源</a>`:''}`:''}
         </div>
       </div>`;
     }).join('');
@@ -651,6 +657,10 @@ async function showRun(id){
     const nodes = (r.top_nodes||[]).map(n=>`
       <tr><td>${n.rank}</td><td><b>${esc(n.name)}</b></td><td>${esc(n.server)}:${n.port}</td>
       <td style="color:var(--ok)">${esc(n.speed)}</td><td>${esc(n.latency)}</td><td>${esc(n.dc||'-')} / ${esc(n.loc||'-')}</td></tr>`).join('');
+    const psRows = (r.per_source_top||[]).map(g=>
+      (g.nodes||[]).map((n,i)=>`
+      <tr><td>${esc(g.name)}</td><td>${i+1}</td><td><b>${esc(n.name)}</b></td><td>${esc(n.server)}:${n.port}</td>
+      <td style="color:var(--ok)">${esc(n.speed)}</td><td>${esc(n.latency)}</td><td>${esc(n.dc||'-')} / ${esc(n.loc||'-')}</td></tr>`).join('')).join('');
     $('runDetail').innerHTML = `
       <div class="section-title">各源测试情况</div>
       <div class="table-scroll"><table><thead><tr><th>源名称</th><th>API 地址</th><th>状态</th><th>节点数</th><th>耗时</th></tr></thead>
@@ -658,6 +668,9 @@ async function showRun(id){
       <div class="section-title">Top ${r.top_count||0} 节点（按速度降序）</div>
       <div class="table-scroll"><table><thead><tr><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
       <tbody>${nodes||'<tr><td colspan="6" class="empty">无节点</td></tr>'}</tbody></table></div>
+      ${psRows?`<div class="section-title">各源最快 ${r.per_source_count||5} 节点（分源排序）</div>
+      <div class="table-scroll"><table><thead><tr><th>源</th><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
+      <tbody>${psRows}</tbody></table></div>`:''}
       ${r.preview&&r.preview.yaml?`<div class="section-title">Clash YAML 预览</div><pre class="code">${esc(r.preview.yaml)}</pre>`:''}`;
     $('runDetailCard').scrollIntoView({behavior:'smooth'});
   }catch(e){ toast(e.message,false) }

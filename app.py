@@ -39,7 +39,7 @@ CFDATA_CONFIG_PATH = os.path.join(APP_DIR, 'cfdata-config.json')
 RUNS_INDEX_PATH = os.path.join(RESULTS_DIR, 'runs.json')
 # 固定的"最新结果"目录: 每次任务成功后同步覆盖, 路径不变便于外部订阅
 LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
-LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt')
+LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt', 'top_by_source.txt')
 
 # CSV 导出字段(传给 cfdata -fields), 与中文表头一一对应
 CSV_FIELDS = 'ipport,latency,speed,dc,loc,region,city'
@@ -63,7 +63,8 @@ DEFAULT_CONFIG = {
     'cron': {'enabled': False, 'expr': '0 8 * * *'},
     'settings': {
         'binary_path': '',          # 留空则自动检测
-        'top_n': 20,                # 提取前 N 个节点
+        'top_n': 20,                # 提取前 N 个节点(全局合并排序后)
+        'per_source_top_n': 5,      # 每个源单独提取速度最快的前 N 个节点(输出 top_by_source.txt)
         'speedtest_threads': 5,     # -nsbspeedtest 测速线程数
         'speed_min': 5.0,           # -nsbspeedmin 最低速度 MB/s
         'speed_limit': 9999,        # -nsbspeedlimit 测速结果上限
@@ -556,6 +557,7 @@ class TaskRunner:
 
             all_rows = {}
             source_reports = []
+            source_rows = []   # 每个源各自的原始行(保留源归属, 用于分源 Top)
             for idx, src in enumerate(sources):
                 if self._cancel:
                     raise _CanceledError()
@@ -565,6 +567,7 @@ class TaskRunner:
                 label = '(%d/%d) %s' % (idx + 1, len(sources), src['name'])
                 rows, report = self._run_one_source(binary, src, idx, run_dir, settings, log, label)
                 source_reports.append(report)
+                source_rows.append(rows)
                 for r in rows:
                     key = r['ipport']
                     if key not in all_rows or r['speed'] > all_rows[key]['speed']:
@@ -581,8 +584,22 @@ class TaskRunner:
                 log('Top%-3d %s  速度=%s  延迟=%s  数据中心=%s' % (
                     i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
 
-            # ---- 生成两种格式 ----
-            txt_path, yaml_path, all_path = self._write_outputs(run_dir, top, merged, settings, log)
+            # ---- 分源 Top N: 每个源单独提取速度最快的前 N 个 ----
+            per_source_n = max(1, int(settings.get('per_source_top_n') or 5))
+            per_source_top = []
+            for idx, src in enumerate(sources):
+                rows = sorted((r for r in source_rows[idx] if r['speed'] >= 0),
+                              key=lambda r: (-r['speed'], r['latency_ms'], r['ipport']))
+                src_top = rows[:per_source_n]
+                per_source_top.append({'name': src['name'], 'nodes': src_top})
+                log('[%s] 速度最快 %d 个节点:' % (src['name'], len(src_top)))
+                for i, r in enumerate(src_top):
+                    log('  #%-2d %s  速度=%s  延迟=%s  数据中心=%s' % (
+                        i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
+
+            # ---- 生成输出文件 ----
+            txt_path, yaml_path, all_path, by_source_path = self._write_outputs(
+                run_dir, top, merged, per_source_top, settings, log)
             record = {
                 'id': run_id,
                 'trigger': trigger,
@@ -592,17 +609,27 @@ class TaskRunner:
                 'sources': source_reports,
                 'total_nodes': len(merged),
                 'top_count': len(top),
+                'per_source_count': per_source_n,
                 'files': {
                     'txt': os.path.basename(txt_path),
                     'yaml': os.path.basename(yaml_path),
                     'all': os.path.basename(all_path),
+                    'by_source': os.path.basename(by_source_path),
                 },
                 'top_nodes': [self._node_payload(r, i, settings) for i, r in enumerate(top)],
+                'per_source_top': [
+                    {'name': g['name'],
+                     'nodes': [self._node_payload(r, i, settings)
+                               for i, r in enumerate(g['nodes'])]}
+                    for g in per_source_top
+                ],
             }
             save_run_record(record)
             self._sync_latest(run_dir, record, log)
             log('已保存 %d 个节点到两种格式: %s / %s' % (
                 len(top), os.path.basename(txt_path), os.path.basename(yaml_path)))
+            log('已生成分源优选结果: %s (每源速度最快 %d 个)' % (
+                os.path.basename(by_source_path), per_source_n))
             log('===== 任务完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       current_source='', message='成功: %d 个节点' % len(top))
@@ -852,18 +879,20 @@ class TaskRunner:
                 'trigger': record.get('trigger'),
                 'top_count': record.get('top_count', 0),
                 'total_nodes': record.get('total_nodes', 0),
-                'files': {'txt': 'top_nodes.txt', 'yaml': 'top_nodes.yaml', 'all': 'all_sorted.txt'},
+                'per_source_count': record.get('per_source_count', 0),
+                'files': {'txt': 'top_nodes.txt', 'yaml': 'top_nodes.yaml',
+                          'all': 'all_sorted.txt', 'by_source': 'top_by_source.txt'},
             }
             tmp = os.path.join(LATEST_DIR, 'meta.json.tmp')
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             os.replace(tmp, os.path.join(LATEST_DIR, 'meta.json'))
             log('已同步最新结果到固定目录: results/latest/ '
-                '(top_nodes.txt / top_nodes.yaml / all_sorted.txt)')
+                '(top_nodes.txt / top_nodes.yaml / all_sorted.txt / top_by_source.txt)')
         except Exception as e:
             log('同步 latest 目录失败: %s' % e)
 
-    def _write_outputs(self, run_dir, top, merged, settings, log):
+    def _write_outputs(self, run_dir, top, merged, per_source_top, settings, log):
         node_cfg = settings.get('node', {})
         used_names = set()
 
@@ -901,7 +930,21 @@ class TaskRunner:
         with open(all_path, 'w', encoding='utf-8') as f:
             for r in merged:
                 f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
-        return txt_path, yaml_path, all_path
+
+        # 附加: 分源 Top N (每个源单独提取速度最快的前 N 个节点)
+        per_source_n = max(1, int(settings.get('per_source_top_n') or 5))
+        by_source_path = os.path.join(run_dir, 'top_by_source.txt')
+        with open(by_source_path, 'w', encoding='utf-8') as f:
+            f.write('# CFData 分源优选 Top%d  生成时间: %s\n' % (per_source_n, now_str()))
+            f.write('# 每个源单独按下载速度降序提取最快 %d 个节点\n' % per_source_n)
+            f.write('# 格式: ip:port#下载速度-数据中心-源IP位置\n\n')
+            for g in (per_source_top or []):
+                f.write('===== %s (%d) =====\n' % (g['name'], len(g['nodes'])))
+                for r in g['nodes']:
+                    f.write('%s#%s-%s-%s\n' % (
+                        r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
+                f.write('\n')
+        return txt_path, yaml_path, all_path, by_source_path
 
 
 class _CanceledError(Exception):
