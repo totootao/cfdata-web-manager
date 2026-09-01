@@ -37,6 +37,9 @@ RESULTS_DIR = os.path.join(APP_DIR, 'results')
 WEB_DIR = os.path.join(APP_DIR, 'web')
 CFDATA_CONFIG_PATH = os.path.join(APP_DIR, 'cfdata-config.json')
 RUNS_INDEX_PATH = os.path.join(RESULTS_DIR, 'runs.json')
+# 固定的"最新结果"目录: 每次任务成功后同步覆盖, 路径不变便于外部订阅
+LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
+LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt')
 
 # CSV 导出字段(传给 cfdata -fields), 与中文表头一一对应
 CSV_FIELDS = 'ipport,latency,speed,dc,loc,region,city'
@@ -597,6 +600,7 @@ class TaskRunner:
                 'top_nodes': [self._node_payload(r, i, settings) for i, r in enumerate(top)],
             }
             save_run_record(record)
+            self._sync_latest(run_dir, record, log)
             log('已保存 %d 个节点到两种格式: %s / %s' % (
                 len(top), os.path.basename(txt_path), os.path.basename(yaml_path)))
             log('===== 任务完成 =====')
@@ -834,6 +838,31 @@ class TaskRunner:
             'dc': r['dc'], 'loc': r['loc'],
         }
 
+    def _sync_latest(self, run_dir, record, log):
+        """将最新一次成功任务的结果同步到 results/latest/ (固定路径, 内容随每次任务更新)"""
+        try:
+            os.makedirs(LATEST_DIR, exist_ok=True)
+            for fname in LATEST_FILES:
+                src = os.path.join(run_dir, fname)
+                if os.path.isfile(src):
+                    shutil.copyfile(src, os.path.join(LATEST_DIR, fname))
+            meta = {
+                'run_id': record.get('id'),
+                'finished_at': record.get('finished_at'),
+                'trigger': record.get('trigger'),
+                'top_count': record.get('top_count', 0),
+                'total_nodes': record.get('total_nodes', 0),
+                'files': {'txt': 'top_nodes.txt', 'yaml': 'top_nodes.yaml', 'all': 'all_sorted.txt'},
+            }
+            tmp = os.path.join(LATEST_DIR, 'meta.json.tmp')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, os.path.join(LATEST_DIR, 'meta.json'))
+            log('已同步最新结果到固定目录: results/latest/ '
+                '(top_nodes.txt / top_nodes.yaml / all_sorted.txt)')
+        except Exception as e:
+            log('同步 latest 目录失败: %s' % e)
+
     def _write_outputs(self, run_dir, top, merged, settings, log):
         node_cfg = settings.get('node', {})
         used_names = set()
@@ -919,6 +948,25 @@ def load_run_record(run_id):
         if r.get('id') == run_id:
             return r
     return None
+
+
+def load_latest_meta():
+    """读取 results/latest/meta.json, 附带各文件是否存在; 无最新结果时返回 None"""
+    meta_path = os.path.join(LATEST_DIR, 'meta.json')
+    if not os.path.isfile(meta_path):
+        return None
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    exists = {}
+    for key, fname in (data.get('files') or {}).items():
+        exists[key] = os.path.isfile(os.path.join(LATEST_DIR, fname))
+    data['exists'] = exists
+    return data
 
 
 # ---------------------------------------------------------------- 定时调度器
@@ -1133,6 +1181,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'ok': True, 'data': slim})
                 return
 
+            if path == '/api/latest':
+                data = load_latest_meta()
+                self._json({'ok': True, 'data': data})
+                return
+
             m = re.fullmatch(r'/api/runs/([\w.:-]+)', path)
             if m:
                 rec = load_run_record(m.group(1))
@@ -1161,7 +1214,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({'ok': False, 'error': '非法路径'}, 400)
                     return
                 mime = 'text/yaml' if fname.endswith(('.yaml', '.yml')) else 'text/plain'
-                self._file(fp, download_name='%s_%s' % (run_id, fname), mime=mime)
+                # latest 固定路径保持原始文件名, 便于订阅工具按名保存
+                dl_name = fname if run_id == 'latest' else '%s_%s' % (run_id, fname)
+                self._file(fp, download_name=dl_name, mime=mime)
                 return
 
             if path == '/api/binary':

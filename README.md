@@ -14,6 +14,7 @@
   - `top_nodes.txt`：`ip:port#速度-数据中心-位置`
   - `top_nodes.yaml`：Clash trojan 节点（password/sni/ws-opts 可在界面配置）
   - 附带 `all_sorted.txt` 全量排序结果
+- **latest 固定目录**：每次任务成功后自动把最新结果同步到 `results/latest/`，路径永不变化，可直接作为订阅链接
 - **历史记录**：每次运行保存各源测试情况、Top 节点表格、YAML 预览，支持在线下载
 
 ## 快速开始
@@ -44,6 +45,26 @@ python3 app.py --port 8088
 4. **手动触发**：点击「手动运行」立即测试，实时查看日志
 5. **运行结果**：下载 `top_nodes.txt` / `top_nodes.yaml`，或查看 Top 节点详情
 
+### latest 固定目录（订阅用法）
+
+每次任务成功后，最新结果会自动同步覆盖到固定目录 `results/latest/`：
+
+```
+results/latest/
+├── top_nodes.txt     # Top 节点 TXT 格式
+├── top_nodes.yaml    # Top 节点 Clash YAML 格式
+├── all_sorted.txt    # 全量排序结果
+└── meta.json         # 元信息（来源运行 ID / 完成时间 / 节点数）
+```
+
+对应固定下载地址（路径不变，内容随每次任务自动更新）：
+
+- `http://服务器IP:8088/api/download/latest/top_nodes.yaml` — 可直接填入 Clash 等客户端作为订阅链接
+- `http://服务器IP:8088/api/download/latest/top_nodes.txt`
+- `http://服务器IP:8088/api/download/latest/all_sorted.txt`
+
+「运行结果」页顶部的「最新结果」卡片提供一键下载与复制订阅链接。
+
 ## 目录结构
 
 ```
@@ -56,6 +77,11 @@ cfdata_web/
 ├── cfdata-config.json     # 运行时自动生成（cfdata CLI 配置）
 └── results/               # 运行时自动生成
     ├── runs.json          # 运行记录索引
+    ├── latest/            # 最新一次成功任务的固定结果目录（自动覆盖更新）
+    │   ├── top_nodes.txt
+    │   ├── top_nodes.yaml
+    │   ├── all_sorted.txt
+    │   └── meta.json      # 元信息（来源运行 ID / 完成时间 / 节点数）
     └── 20260901_080000/   # 每次运行一个目录
         ├── run.log        # 运行日志
         ├── source_01.csv  # 各源原始结果

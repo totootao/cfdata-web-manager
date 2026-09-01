@@ -304,6 +304,11 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
   <!-- 运行结果 -->
   <div id="tab-res" style="display:none">
     <div class="card">
+      <h2>最新结果 <span class="tag ok">latest</span></h2>
+      <div class="desc">最新一次成功任务的结果固定保存于 <b>results/latest/</b>，路径永不变化，可直接用于订阅</div>
+      <div id="latestBox"><div class="empty">暂无最新结果，请先运行任务</div></div>
+    </div>
+    <div class="card">
       <h2>历史运行结果</h2>
       <div class="desc">每次任务完成后保存 Top 节点（TXT + Clash YAML 两种格式）与全量排序结果</div>
       <div id="runsList"><div class="empty">暂无运行记录</div></div>
@@ -314,7 +319,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     </div>
   </div>
 
-  <footer>CFData 优选管理平台 · Python + cfdata · 输出目录 results/</footer>
+  <footer>CFData 优选管理平台 · Python + cfdata · 输出目录 results/（最新结果固定在 results/latest/）</footer>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -419,6 +424,9 @@ function renderState(d){
     const st={success:'成功',error:'失败',canceled:'取消'}[d.last_run.status]||d.last_run.status;
     $('stLast').textContent = st+' · '+d.last_run.top_count+'节点';
   }
+  // 任务刚结束时刷新"最新结果"卡片(仅结果页)
+  if(window._wasRunning && !d.running && curTab==='tab-res') loadLatest();
+  window._wasRunning = d.running;
 }
 
 /* ---------- 手动运行 ---------- */
@@ -566,7 +574,44 @@ async function saveSettings(){
 }
 
 /* ---------- 运行结果 ---------- */
+async function loadLatest(){
+  try{
+    const j = await api('/api/latest');
+    const box = $('latestBox');
+    const d = j.data;
+    if(!d){ box.innerHTML='<div class="empty">暂无最新结果，请先运行任务</div>'; return }
+    const tr = d.trigger==='cron'?'定时':'手动';
+    const subYaml = location.origin+'/api/download/latest/top_nodes.yaml';
+    const subTxt  = location.origin+'/api/download/latest/top_nodes.txt';
+    const ex = d.exists||{};
+    box.innerHTML = `
+      <div class="runrow">
+        <div class="row">
+          <b>${esc(d.run_id||'')}</b>
+          <span class="tag ok">最新</span>
+          <span class="tag off">${tr}</span>
+          <div class="spacer"></div>
+          <span style="font-size:12px;color:var(--muted)">完成于 ${esc(d.finished_at||'')}</span>
+        </div>
+        <div class="meta" style="margin-top:6px">
+          <span>源结果总数: <b style="color:var(--text)">${d.total_nodes??'-'}</b></span>
+          <span>提取节点: <b style="color:var(--cyan)">${d.top_count??'-'}</b></span>
+        </div>
+        <div class="meta" style="margin-top:6px">
+          ${ex.txt?`<a class="dl" href="/api/download/latest/top_nodes.txt">⬇ TXT</a>`:''}
+          ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML</a>`:''}
+          ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量</a>`:''}
+          ${ex.yaml?`<a class="dl" onclick="copyText('${subYaml}','订阅链接')">📋 复制订阅链接</a>`:''}
+          ${ex.txt?`<a class="dl" onclick="copyText('${subTxt}','TXT 链接')">📋 复制 TXT 链接</a>`:''}
+        </div>
+        <div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">
+          固定路径: results/latest/（${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt':''}）
+        </div>
+      </div>`;
+  }catch(e){ /* 静默, 不打断历史列表 */ }
+}
 async function loadRuns(){
+  loadLatest();
   try{
     const j = await api('/api/runs');
     const box = $('runsList');
