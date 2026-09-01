@@ -367,12 +367,55 @@ class TaskRunner:
             'progress_done': 0,
             'progress_total': 0,
             'message': '',
+            # 当前源的子进度: 扫描(延迟测试)与测速
+            'scan_done': 0, 'scan_total': 0,
+            'speed_tested': 0, 'speed_total': 0, 'speed_qualified': 0,
         }
+        # 进度正则: cfdata CLI 输出
+        self._re_scan_start = re.compile(r'开始扫描：(\d+)\s*个地址')
+        self._re_speed_start = re.compile(r'开始(?:非标)?测速：(\d+)\s*条记录')
+        self._re_speed_line = re.compile(r'\[speed\].*?\[(\d+)/(\d+)[\s\d.]*%\]')
+        self._re_scan_line = re.compile(r'\[scan-result\]\s*\[(\d+)/(\d+)[\s\d.]*%\]')
 
     # ---- 状态 ----
     def snapshot(self):
         with self._lock:
             return dict(self.state)
+
+    def _track_progress(self, text):
+        """解析 cfdata CLI 输出行, 更新当前源的扫描/测速子进度"""
+        if not text:
+            return
+        try:
+            m = self._re_speed_start.search(text)
+            if m:
+                total = int(m.group(1))
+                self._set(speed_total=total, speed_tested=0, speed_qualified=0)
+                return
+            m = self._re_scan_start.search(text)
+            if m:
+                self._set(scan_total=int(m.group(1)), scan_done=0)
+                return
+            if '[speed]' in text:
+                m = self._re_speed_line.search(text)
+                qualified = int(m.group(1)) if m else None
+                with self._lock:
+                    st = self.state
+                    st['speed_tested'] = st.get('speed_tested', 0) + 1
+                    if qualified is not None:
+                        st['speed_qualified'] = qualified
+                return
+            m = self._re_scan_line.search(text)
+            if m:
+                with self._lock:
+                    self.state['scan_done'] = max(self.state.get('scan_done', 0), int(m.group(1)))
+                    self.state['scan_total'] = int(m.group(2)) or self.state.get('scan_total', 0)
+        except Exception:
+            pass
+
+    def _reset_sub_progress(self):
+        self._set(scan_done=0, scan_total=0,
+                  speed_tested=0, speed_total=0, speed_qualified=0)
 
     def _set(self, **kw):
         with self._lock:
@@ -490,7 +533,9 @@ class TaskRunner:
             for idx, src in enumerate(sources):
                 if self._cancel:
                     raise _CanceledError()
-                self._set(current_source=src['name'], progress_done=idx)
+                # 显示"第 idx+1 个源进行中", 完成后自然递增
+                self._set(current_source=src['name'], progress_done=idx + 1)
+                self._reset_sub_progress()
                 label = '(%d/%d) %s' % (idx + 1, len(sources), src['name'])
                 rows, report = self._run_one_source(binary, src, idx, run_dir, settings, log, label)
                 source_reports.append(report)
@@ -691,6 +736,7 @@ class TaskRunner:
             for p in parts:
                 text = p.decode('utf-8', errors='replace').strip()
                 if text:
+                    self._track_progress(text)
                     log('%s | %s' % (label, text))
             if time.time() - last_keepalive > 30:
                 last_keepalive = time.time()
@@ -941,6 +987,10 @@ def api_state():
         'message': snap['message'],
         'current_source': snap['current_source'],
         'progress': {'done': snap['progress_done'], 'total': snap['progress_total']},
+        'scan_progress': {'done': snap.get('scan_done', 0), 'total': snap.get('scan_total', 0)},
+        'speed_progress': {'tested': snap.get('speed_tested', 0),
+                           'total': snap.get('speed_total', 0),
+                           'qualified': snap.get('speed_qualified', 0)},
         'trigger': snap['trigger'],
         'started_at': snap['started_at'],
         'cron': {
@@ -1011,6 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
                     body = f.read()
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.send_header('Pragma', 'no-cache')
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -1032,6 +1084,9 @@ class Handler(BaseHTTPRequestHandler):
                 after = int((qs.get('after') or ['0'])[0])
                 lines = RUNNER.log.read(after)
                 snap = RUNNER.snapshot()
+                sp_total = snap.get('speed_total', 0)
+                sp_tested = snap.get('speed_tested', 0)
+                speed_pct = round(sp_tested / sp_total * 100, 1) if sp_total > 0 else None
                 self._json({'ok': True, 'data': {
                     'seq': lines[-1][0] if lines else after,
                     'lines': [l for _, l in lines],
@@ -1039,7 +1094,10 @@ class Handler(BaseHTTPRequestHandler):
                     'phase': snap['phase'],
                     'current_source': snap['current_source'],
                     'progress': {'done': snap['progress_done'], 'total': snap['progress_total']},
-                    'elapsed': None,
+                    'scan_progress': {'done': snap.get('scan_done', 0), 'total': snap.get('scan_total', 0)},
+                    'speed_progress': {'tested': sp_tested, 'total': sp_total,
+                                       'qualified': snap.get('speed_qualified', 0),
+                                       'percent': speed_pct},
                 }})
                 return
 

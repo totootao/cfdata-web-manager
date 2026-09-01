@@ -178,13 +178,20 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     <div class="stats">
       <div class="stat"><div class="v" id="stPhase">—</div><div class="k">任务状态</div></div>
       <div class="stat"><div class="v" id="stSource">—</div><div class="k">当前测试源</div></div>
-      <div class="stat"><div class="v ok" id="stProgress">0 / 0</div><div class="k">源进度</div></div>
+      <div class="stat"><div class="v ok" id="stProgress">0 / 0</div><div class="k">源进度（当前第几个 / 总数）</div></div>
       <div class="stat"><div class="v warn" id="stLast">—</div><div class="k">上次结果</div></div>
     </div>
     <div class="card">
       <h2>实时日志</h2>
       <div class="desc">cfdata 测试过程输出（扫描进度 / 测速 / 排序结果）</div>
-      <div style="margin-bottom:10px" class="progress"><div id="progBar"></div></div>
+      <div style="margin-bottom:8px" class="progress"><div id="progBar"></div></div>
+      <div id="subProgressWrap" style="display:none;margin-bottom:10px">
+        <div class="row" style="justify-content:space-between;margin-bottom:5px;font-size:12px">
+          <span id="subProgressLabel" style="color:var(--muted)">—</span>
+          <span id="subProgressText" style="color:var(--cyan);font-weight:600">—</span>
+        </div>
+        <div class="progress"><div id="subProgBar" style="background:linear-gradient(90deg,#f59e0b,#f97316)"></div></div>
+      </div>
       <div id="logbox"><span class="t">等待任务运行… 点击右上角「手动运行」或配置定时任务后自动执行。</span></div>
     </div>
   </div>
@@ -251,7 +258,8 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <div class="grid g3">
         <div class="field"><label>测速线程数 (-nsbspeedtest)</label><input type="number" id="sSpeedThreads" min="0" step="1"></div>
         <div class="field"><label>最低速度 MB/s (-nsbspeedmin)</label><input type="number" id="sSpeedMin" min="0" step="0.1"></div>
-        <div class="field"><label>测速上限 (-nsbspeedlimit)</label><input type="number" id="sSpeedLimit" min="0" step="1"></div>
+        <div class="field"><label>测速上限 (-nsbspeedlimit)</label><input type="number" id="sSpeedLimit" min="0" step="1">
+          <div class="hint">达标结果数上限；9999=不限制。设小（如 50）达标够数后提前结束</div></div>
         <div class="field"><label>结果上限 (-nsbresultlimit)</label><input type="number" id="sResultLimit" min="1" step="1"></div>
         <div class="field"><label>扫描并发 (-nsbthreads)</label><input type="number" id="sThreads" min="1" step="1"></div>
         <div class="field"><label>IP 类型 (-nsbiptype)</label>
@@ -387,6 +395,26 @@ function renderState(d){
   $('stProgress').textContent = d.progress.done+' / '+d.progress.total;
   const pct = d.progress.total>0 ? Math.round(d.progress.done/d.progress.total*100) : 0;
   $('progBar').style.width = pct+'%';
+  // 子进度: 测速优先于扫描显示(同一时间只会有一类)
+  const wrap = $('subProgressWrap');
+  const srcTag = (d.current_source && d.running) ? d.current_source : '最终';
+  if(d.speed_progress && d.speed_progress.total>0){
+    const sp = d.speed_progress;
+    const p = Math.min(100, Math.round(sp.tested/sp.total*100));
+    wrap.style.display='';
+    $('subProgressLabel').textContent = '⚡ 测速进度（'+srcTag+'）';
+    $('subProgressText').textContent = sp.tested+' / '+sp.total+'（'+p+'%）· 达标 '+sp.qualified;
+    $('subProgBar').style.width = p+'%';
+  }else if(d.scan_progress && d.scan_progress.total>0){
+    const sc = d.scan_progress;
+    const p = Math.min(100, Math.round(sc.done/sc.total*100));
+    wrap.style.display='';
+    $('subProgressLabel').textContent = '🔍 延迟扫描进度（'+srcTag+'）';
+    $('subProgressText').textContent = sc.done+' / '+sc.total+'（'+p+'%）';
+    $('subProgBar').style.width = p+'%';
+  }else{
+    wrap.style.display='none';
+  }
   if(d.last_run){
     const st={success:'成功',error:'失败',canceled:'取消'}[d.last_run.status]||d.last_run.status;
     $('stLast').textContent = st+' · '+d.last_run.top_count+'节点';
