@@ -66,6 +66,8 @@ DEFAULT_CONFIG = {
         'binary_path': '',          # 留空则自动检测
         'top_n': 20,                # 提取前 N 个节点(全局合并排序后)
         'per_source_top_n': 5,      # 每个源单独提取速度最快的前 N 个节点(输出 top_by_source.txt)
+        'source_retries': 3,        # 源获取失败自动重试次数(0 = 不重试)
+        'source_retry_delay': 5,    # 重试间隔秒数
         'speedtest_threads': 5,     # -nsbspeedtest 测速线程数
         'speed_min': 5.0,           # -nsbspeedmin 最低速度 MB/s
         'speed_limit': 9999,        # -nsbspeedlimit 测速结果上限
@@ -674,10 +676,65 @@ class TaskRunner:
 
     # ---- 单个源测试 ----
     def _run_one_source(self, binary, src, idx, run_dir, settings, log, label):
+        """执行单个源测试; 获取失败(退出码非 0 / 无有效节点 / 异常)时自动重试"""
+        def _num(key, default, minimum):
+            try:
+                v = settings.get(key)
+                v = default if v is None else float(v)
+            except (TypeError, ValueError):
+                v = default
+            return max(minimum, v)
+
+        retry_times = int(_num('source_retries', 3, 0))
+        retry_delay = _num('source_retry_delay', 5, 0)
+        total_attempts = retry_times + 1
+
+        started = time.time()
+        attempt, rows, code, err = 0, [], None, None
+        while True:
+            attempt += 1
+            rows, code, err = self._exec_source_once(binary, src, idx, run_dir, settings, log, label)
+            if self._cancel:
+                raise _CanceledError()
+            ok = (code == 0) and len(rows) > 0 and not err
+            if ok or attempt >= total_attempts:
+                break
+            log('%s 第 %d/%d 次尝试失败 (退出码 %s, 有效节点 %d 个), %.0f 秒后重试…' % (
+                label, attempt, total_attempts,
+                code if code is not None else '异常', len(rows), retry_delay))
+            # 分片睡眠, 重试等待期间仍可取消任务
+            steps = max(1, int(retry_delay * 2))
+            for _ in range(steps):
+                if self._cancel:
+                    raise _CanceledError()
+                time.sleep(max(0.05, retry_delay / steps))
+
+        elapsed = time.time() - started
+        if (code == 0) and len(rows) > 0 and not err:
+            log('%s 完成: 耗时 %.1f 秒, 尝试 %d 次, 符合条件节点 %d 个' % (
+                label, elapsed, attempt, len(rows)))
+            return rows, {
+                'name': src['name'], 'url': src['url'], 'ok': True,
+                'count': len(rows), 'elapsed_sec': round(elapsed, 1),
+                'exit_code': code, 'attempts': attempt,
+            }
+        # 全部尝试均失败(返回可能残留的部分结果)
+        reason = err or ('退出码 %s, 无有效节点' % (code if code is not None else '未知'))
+        if attempt > 1:
+            reason = '已重试 %d 次仍失败: %s' % (attempt - 1, reason)
+        log('%s 最终失败: %s' % (label, reason))
+        return rows, {
+            'name': src['name'], 'url': src['url'], 'ok': False,
+            'count': len(rows), 'elapsed_sec': round(elapsed, 1),
+            'error': reason, 'exit_code': code, 'attempts': attempt,
+        }
+
+    def _exec_source_once(self, binary, src, idx, run_dir, settings, log, label):
+        """执行一次 cfdata 测试, 返回 (rows, exit_code, error)"""
         out_name = 'source_%02d.csv' % (idx + 1)
         out_path = os.path.join(run_dir, out_name)
         if os.path.exists(out_path):
-            os.remove(out_path)
+            os.remove(out_path)  # 清理上次尝试的残留, 避免误读旧结果
         cmd = [
             binary,
             '-cli=true',
@@ -699,7 +756,6 @@ class TaskRunner:
             '-config=%s' % CFDATA_CONFIG_PATH,
         ]
         log('%s 开始测试: %s' % (label, src['url']))
-        started = time.time()
         proc = None
         # 复用已缓存的 locations.json, 避免每次运行都重新下载数据中心位置信息
         cached_locations = os.path.join(APP_DIR, 'locations.json')
@@ -726,7 +782,6 @@ class TaskRunner:
             timeout = float(settings.get('timeout_minutes') or 0) * 60
             self._stream_output(proc, log, label, timeout, settings)
             code = proc.wait()
-            elapsed = time.time() - started
             if self._cancel:
                 raise _CanceledError()
             if code != 0:
@@ -739,22 +794,13 @@ class TaskRunner:
                     shutil.copyfile(run_locations, cached_locations)
                 except Exception:
                     pass
-            log('%s 完成: 耗时 %.1f 秒, 符合条件节点 %d 个' % (label, elapsed, len(rows)))
-            return rows, {
-                'name': src['name'], 'url': src['url'], 'ok': True,
-                'count': len(rows), 'elapsed_sec': round(elapsed, 1),
-                'exit_code': code,
-            }
+            return rows, code, None
         except _CanceledError:
             raise
         except Exception as e:
-            elapsed = time.time() - started
             log('%s 执行异常: %s' % (label, e))
             rows = self._parse_csv(out_path) if os.path.exists(out_path) else []
-            return rows, {
-                'name': src['name'], 'url': src['url'], 'ok': False,
-                'count': len(rows), 'elapsed_sec': round(elapsed, 1), 'error': str(e),
-            }
+            return rows, None, str(e)
         finally:
             with self._lock:
                 self._proc = None
