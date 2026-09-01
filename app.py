@@ -39,7 +39,8 @@ CFDATA_CONFIG_PATH = os.path.join(APP_DIR, 'cfdata-config.json')
 RUNS_INDEX_PATH = os.path.join(RESULTS_DIR, 'runs.json')
 # 固定的"最新结果"目录: 每次任务成功后同步覆盖, 路径不变便于外部订阅
 LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
-LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt', 'top_by_source.txt')
+LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt',
+                'top_by_source.txt', 'top_by_source.yaml')
 
 # CSV 导出字段(传给 cfdata -fields), 与中文表头一一对应
 CSV_FIELDS = 'ipport,latency,speed,dc,loc,region,city'
@@ -148,6 +149,16 @@ def render_name_template(template, fields):
         val = fields.get(key, '')
         return str(val) if val is not None else ''
     return re.sub(r'\{(\w+)\}', repl, template or '')
+
+
+def unique_name(name, used):
+    """节点名去重: 冲突时追加 #2/#3 序号"""
+    base, i = name, 2
+    while name in used:
+        name = '%s #%d' % (base, i)
+        i += 1
+    used.add(name)
+    return name
 
 
 # ---------------------------------------------------------------- 配置管理
@@ -598,7 +609,7 @@ class TaskRunner:
                         i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
 
             # ---- 生成输出文件 ----
-            txt_path, yaml_path, all_path, by_source_path = self._write_outputs(
+            txt_path, yaml_path, all_path, by_source_path, by_source_yaml_path = self._write_outputs(
                 run_dir, top, merged, per_source_top, settings, log)
             record = {
                 'id': run_id,
@@ -615,6 +626,7 @@ class TaskRunner:
                     'yaml': os.path.basename(yaml_path),
                     'all': os.path.basename(all_path),
                     'by_source': os.path.basename(by_source_path),
+                    'by_source_yaml': os.path.basename(by_source_yaml_path),
                 },
                 'top_nodes': [self._node_payload(r, i, settings) for i, r in enumerate(top)],
                 'per_source_top': [
@@ -628,8 +640,8 @@ class TaskRunner:
             self._sync_latest(run_dir, record, log)
             log('已保存 %d 个节点到两种格式: %s / %s' % (
                 len(top), os.path.basename(txt_path), os.path.basename(yaml_path)))
-            log('已生成分源优选结果: %s (每源速度最快 %d 个)' % (
-                os.path.basename(by_source_path), per_source_n))
+            log('已生成分源优选结果: %s / %s (每源速度最快 %d 个)' % (
+                os.path.basename(by_source_path), os.path.basename(by_source_yaml_path), per_source_n))
             log('===== 任务完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       current_source='', message='成功: %d 个节点' % len(top))
@@ -881,70 +893,79 @@ class TaskRunner:
                 'total_nodes': record.get('total_nodes', 0),
                 'per_source_count': record.get('per_source_count', 0),
                 'files': {'txt': 'top_nodes.txt', 'yaml': 'top_nodes.yaml',
-                          'all': 'all_sorted.txt', 'by_source': 'top_by_source.txt'},
+                          'all': 'all_sorted.txt', 'by_source': 'top_by_source.txt',
+                          'by_source_yaml': 'top_by_source.yaml'},
             }
             tmp = os.path.join(LATEST_DIR, 'meta.json.tmp')
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             os.replace(tmp, os.path.join(LATEST_DIR, 'meta.json'))
             log('已同步最新结果到固定目录: results/latest/ '
-                '(top_nodes.txt / top_nodes.yaml / all_sorted.txt / top_by_source.txt)')
+                '(top_nodes.txt / top_nodes.yaml / all_sorted.txt / '
+                'top_by_source.txt / top_by_source.yaml)')
         except Exception as e:
             log('同步 latest 目录失败: %s' % e)
 
     def _write_outputs(self, run_dir, top, merged, per_source_top, settings, log):
         node_cfg = settings.get('node', {})
-        used_names = set()
 
-        # 格式 1: TXT  ip:port#速度-数据中心-位置
+        def write_node(f, r, name):
+            f.write('  - name: %s\n' % yaml_value(name))
+            f.write('    server: %s\n' % yaml_value(r['ip']))
+            f.write('    port: %s\n' % r['port'])
+            f.write('    type: trojan\n')
+            f.write('    password: %s\n' % yaml_value(node_cfg.get('password', '')))
+            f.write('    sni: %s\n' % yaml_value(node_cfg.get('sni', '')))
+            f.write('    client-fingerprint: %s\n' % yaml_value(node_cfg.get('client_fingerprint', 'chrome')))
+            f.write('    skip-cert-verify: %s\n' % ('true' if node_cfg.get('skip_cert_verify') else 'false'))
+            f.write('    network: ws\n')
+            f.write('    ws-opts:\n')
+            f.write('      path: %s\n' % yaml_value(node_cfg.get('path', '/')))
+            f.write('      headers:\n')
+            f.write('        Host: %s\n' % yaml_value(node_cfg.get('host', node_cfg.get('sni', ''))))
+
+        # 格式 1: TXT  ip:port#速度-数据中心-位置 (纯数据行, 无注释)
         txt_path = os.path.join(run_dir, 'top_nodes.txt')
         with open(txt_path, 'w', encoding='utf-8') as f:
-            f.write('# CFData 优选 Top%d  生成时间: %s\n' % (len(top), now_str()))
-            f.write('# 格式: ip:port#下载速度-数据中心-源IP位置\n')
             for r in top:
                 f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
 
         # 格式 2: Clash YAML (与附件格式一致)
+        used_names = set()
         yaml_path = os.path.join(run_dir, 'top_nodes.yaml')
         with open(yaml_path, 'w', encoding='utf-8') as f:
-            f.write('# CFData 优选 Top%d 节点  生成时间: %s\n' % (len(top), now_str()))
             f.write('proxies:\n')
             for r in top:
-                name = self._node_name(r, settings, used_names)
-                f.write('  - name: %s\n' % yaml_value(name))
-                f.write('    server: %s\n' % yaml_value(r['ip']))
-                f.write('    port: %s\n' % r['port'])
-                f.write('    type: trojan\n')
-                f.write('    password: %s\n' % yaml_value(node_cfg.get('password', '')))
-                f.write('    sni: %s\n' % yaml_value(node_cfg.get('sni', '')))
-                f.write('    client-fingerprint: %s\n' % yaml_value(node_cfg.get('client_fingerprint', 'chrome')))
-                f.write('    skip-cert-verify: %s\n' % ('true' if node_cfg.get('skip_cert_verify') else 'false'))
-                f.write('    network: ws\n')
-                f.write('    ws-opts:\n')
-                f.write('      path: %s\n' % yaml_value(node_cfg.get('path', '/')))
-                f.write('      headers:\n')
-                f.write('        Host: %s\n' % yaml_value(node_cfg.get('host', node_cfg.get('sni', ''))))
+                write_node(f, r, self._node_name(r, settings, used_names))
 
-        # 附加: 全量排序结果
+        # 附加: 全量排序结果 (纯数据行, 无注释)
         all_path = os.path.join(run_dir, 'all_sorted.txt')
         with open(all_path, 'w', encoding='utf-8') as f:
             for r in merged:
                 f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
 
-        # 附加: 分源 Top N (每个源单独提取速度最快的前 N 个节点)
+        # 附加: 分源 Top N TXT (每个源单独提取速度最快的前 N 个节点, 纯数据+分组行)
         per_source_n = max(1, int(settings.get('per_source_top_n') or 5))
         by_source_path = os.path.join(run_dir, 'top_by_source.txt')
         with open(by_source_path, 'w', encoding='utf-8') as f:
-            f.write('# CFData 分源优选 Top%d  生成时间: %s\n' % (per_source_n, now_str()))
-            f.write('# 每个源单独按下载速度降序提取最快 %d 个节点\n' % per_source_n)
-            f.write('# 格式: ip:port#下载速度-数据中心-源IP位置\n\n')
             for g in (per_source_top or []):
                 f.write('===== %s (%d) =====\n' % (g['name'], len(g['nodes'])))
                 for r in g['nodes']:
                     f.write('%s#%s-%s-%s\n' % (
                         r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
                 f.write('\n')
-        return txt_path, yaml_path, all_path, by_source_path
+
+        # 附加: 分源 Top N 的 Clash YAML (节点名带 [源名] 前缀以区分来源)
+        used_by = set()
+        by_source_yaml_path = os.path.join(run_dir, 'top_by_source.yaml')
+        with open(by_source_yaml_path, 'w', encoding='utf-8') as f:
+            f.write('proxies:\n')
+            for g in (per_source_top or []):
+                for r in g['nodes']:
+                    base = self._node_name(r, settings, set())
+                    name = unique_name('[%s] %s' % (g['name'], base), used_by)
+                    write_node(f, r, name)
+        return txt_path, yaml_path, all_path, by_source_path, by_source_yaml_path
 
 
 class _CanceledError(Exception):

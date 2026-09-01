@@ -11,10 +11,10 @@
 - **手动触发**：一键运行/取消，实时日志流（扫描进度、测速结果、Top 排名），防重复运行
 - **自动排序提取**：所有源测完后按下载速度降序合并去重，提取前 N 个（默认 20）节点
 - **双格式输出**：
-  - `top_nodes.txt`：`ip:port#速度-数据中心-位置`
+  - `top_nodes.txt`：`ip:port#速度-数据中心-位置`（纯数据行，无注释）
   - `top_nodes.yaml`：Clash trojan 节点（password/sni/ws-opts 可在界面配置）
   - 附带 `all_sorted.txt` 全量排序结果
-- **分源优选**：测速完成后每个源单独提取速度最快的前 N 个节点（默认 5，可配置），输出 `top_by_source.txt`，运行详情页同步展示分源排名表格
+- **分源优选**：测速完成后每个源单独提取速度最快的前 N 个节点（默认 5，可配置），输出 `top_by_source.txt` 与对应的 Clash YAML `top_by_source.yaml`（节点名带 `[源名]` 前缀），运行详情页同步展示分源排名表格
 - **latest 固定目录**：每次任务成功后自动把最新结果同步到 `results/latest/`，路径永不变化，可直接作为订阅链接
 - **历史记录**：每次运行保存各源测试情况、Top 节点表格、分源最快节点表格、YAML 预览，支持在线下载
 
@@ -56,6 +56,7 @@ results/latest/
 ├── top_nodes.yaml      # Top 节点 Clash YAML 格式
 ├── all_sorted.txt      # 全量排序结果
 ├── top_by_source.txt   # 分源最快节点（每源前 N 个）
+├── top_by_source.yaml  # 分源最快节点 Clash YAML
 └── meta.json           # 元信息（来源运行 ID / 完成时间 / 节点数）
 ```
 
@@ -65,6 +66,7 @@ results/latest/
 - `http://服务器IP:8088/api/download/latest/top_nodes.txt`
 - `http://服务器IP:8088/api/download/latest/all_sorted.txt`
 - `http://服务器IP:8088/api/download/latest/top_by_source.txt`
+- `http://服务器IP:8088/api/download/latest/top_by_source.yaml`
 
 「运行结果」页顶部的「最新结果」卡片提供一键下载与复制订阅链接。
 
@@ -85,6 +87,7 @@ cfdata_web/
     │   ├── top_nodes.yaml
     │   ├── all_sorted.txt
     │   ├── top_by_source.txt
+    │   ├── top_by_source.yaml
     │   └── meta.json      # 元信息（来源运行 ID / 完成时间 / 节点数）
     └── 20260901_080000/   # 每次运行一个目录
         ├── run.log        # 运行日志
@@ -92,7 +95,8 @@ cfdata_web/
         ├── top_nodes.txt  # Top 节点（TXT 格式）
         ├── top_nodes.yaml # Top 节点（Clash YAML 格式）
         ├── all_sorted.txt # 全量排序结果
-        └── top_by_source.txt # 分源最快节点（每源前 N 个）
+        ├── top_by_source.txt # 分源最快节点（每源前 N 个）
+        └── top_by_source.yaml # 分源最快节点（Clash YAML 格式）
 ```
 
 ## 输出格式示例
@@ -104,7 +108,7 @@ TXT（`top_nodes.txt`）：
 91.213.174.82:2053#32.91MB/s-HKG-HK
 ```
 
-分源最快节点（`top_by_source.txt`，每个源单独按速度降序提取前 N 个）：
+分源最快节点（`top_by_source.txt`，每个源单独按速度降序提取前 N 个，纯数据行无注释）：
 
 ```
 ===== HK 优选 (5) =====
@@ -114,6 +118,17 @@ TXT（`top_nodes.txt`）：
 
 ===== JP 优选 (5) =====
 ...
+```
+
+分源最快节点 Clash YAML（`top_by_source.yaml`，节点名带 `[源名]` 前缀区分来源）：
+
+```yaml
+proxies:
+  - name: "[HK 优选] HKG-HK-42.41MB/s"
+    server: 104.16.132.229
+    port: 443
+    type: trojan
+    ...
 ```
 
 Clash YAML（`top_nodes.yaml`）：

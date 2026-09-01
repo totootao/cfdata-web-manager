@@ -312,7 +312,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     </div>
     <div class="card">
       <h2>历史运行结果</h2>
-      <div class="desc">每次任务完成后保存 Top 节点（TXT + Clash YAML 两种格式）、全量排序结果与各源最快节点（top_by_source.txt）</div>
+      <div class="desc">每次任务完成后保存 Top 节点（TXT + Clash YAML）、全量排序结果与各源最快节点（top_by_source.txt / .yaml）</div>
       <div id="runsList"><div class="empty">暂无运行记录</div></div>
     </div>
     <div class="card" id="runDetailCard" style="display:none">
@@ -587,6 +587,7 @@ async function loadLatest(){
     const tr = d.trigger==='cron'?'定时':'手动';
     const subYaml = location.origin+'/api/download/latest/top_nodes.yaml';
     const subTxt  = location.origin+'/api/download/latest/top_nodes.txt';
+    const subByY  = location.origin+'/api/download/latest/top_by_source.yaml';
     const ex = d.exists||{};
     box.innerHTML = `
       <div class="runrow">
@@ -606,11 +607,13 @@ async function loadLatest(){
           ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML</a>`:''}
           ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量</a>`:''}
           ${ex.by_source?`<a class="dl" href="/api/download/latest/top_by_source.txt">⬇ 分源Top${d.per_source_count??5}</a>`:''}
+          ${ex.by_source_yaml?`<a class="dl" href="/api/download/latest/top_by_source.yaml">⬇ 分源YAML</a>`:''}
           ${ex.yaml?`<a class="dl" onclick="copyText('${subYaml}','订阅链接')">📋 复制订阅链接</a>`:''}
+          ${ex.by_source_yaml?`<a class="dl" onclick="copyText('${subByY}','分源订阅链接')">📋 复制分源订阅</a>`:''}
           ${ex.txt?`<a class="dl" onclick="copyText('${subTxt}','TXT 链接')">📋 复制 TXT 链接</a>`:''}
         </div>
         <div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">
-          固定路径: results/latest/（${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt ':''}${ex.by_source?'top_by_source.txt':''}）
+          固定路径: results/latest/（${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt ':''}${ex.by_source?'top_by_source.txt ':''}${ex.by_source_yaml?'top_by_source.yaml':''}）
         </div>
       </div>`;
   }catch(e){ /* 静默, 不打断历史列表 */ }
@@ -639,7 +642,8 @@ async function loadRuns(){
           ${r.files?`<a class="dl" href="/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT</a>
           <a class="dl" href="/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML</a>
           <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量</a>
-          ${r.files.by_source?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source}" onclick="event.stopPropagation()">⬇ 分源</a>`:''}`:''}
+          ${r.files.by_source?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source}" onclick="event.stopPropagation()">⬇ 分源</a>`:''}
+          ${r.files.by_source_yaml?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source_yaml}" onclick="event.stopPropagation()">⬇ 分源YAML</a>`:''}`:''}
         </div>
       </div>`;
     }).join('');
