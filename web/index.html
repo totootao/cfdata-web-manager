@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CFData 优选管理平台</title>
+<style>
+:root{
+  --bg:#0b1020;--bg2:#111832;--card:#151d3a;--card2:#1a2447;
+  --border:#263258;--text:#e6ebff;--muted:#8b96c2;--dim:#5a668f;
+  --accent:#4f7cff;--accent2:#6c5ce7;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;
+  --cyan:#22d3ee;--radius:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Noto Sans CJK SC","Microsoft YaHei","PingFang SC",-apple-system,sans-serif;
+  background:radial-gradient(1200px 600px at 80% -10%,#1a2a5e 0%,var(--bg) 55%);
+  color:var(--text);min-height:100vh;font-size:14px}
+.wrap{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.logo{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));font-size:20px;box-shadow:0 6px 18px rgba(79,124,255,.35)}
+h1{font-size:20px;font-weight:700;letter-spacing:.5px}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.badge{padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
+.badge.run{background:rgba(79,124,255,.15);color:#8fb0ff;border:1px solid rgba(79,124,255,.4)}
+.badge.idle{background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.35)}
+.badge.err{background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.35)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.spacer{flex:1}
+button{cursor:pointer;border:none;border-radius:10px;font-size:13px;font-weight:600;
+  padding:9px 16px;color:#fff;transition:.15s;font-family:inherit}
+button:disabled{opacity:.45;cursor:not-allowed}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 4px 14px rgba(79,124,255,.3)}
+.btn-primary:hover:not(:disabled){transform:translateY(-1px)}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--muted)}
+.btn-ghost:hover:not(:disabled){color:var(--text);border-color:var(--accent)}
+.btn-danger{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);color:#f87171}
+.btn-danger:hover:not(:disabled){background:rgba(239,68,68,.25)}
+.btn-sm{padding:5px 10px;font-size:12px;border-radius:8px}
+nav{display:flex;gap:6px;background:var(--bg2);padding:6px;border-radius:var(--radius);
+  border:1px solid var(--border);margin-bottom:18px;flex-wrap:wrap}
+nav button{background:transparent;color:var(--muted);padding:9px 18px;border-radius:10px}
+nav button.active{background:linear-gradient(135deg,rgba(79,124,255,.25),rgba(108,92,231,.25));color:var(--text)}
+nav button:hover{color:var(--text)}
+.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--border);
+  border-radius:var(--radius);padding:20px;margin-bottom:16px;box-shadow:0 8px 28px rgba(0,0,0,.25)}
+.card h2{font-size:15px;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.card .desc{color:var(--muted);font-size:12px;margin-bottom:14px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:12px;color:var(--muted);font-weight:600}
+.field .hint{font-size:11px;color:var(--dim)}
+input[type=text],input[type=number],input[type=url],select{
+  background:var(--bg2);border:1px solid var(--border);border-radius:10px;color:var(--text);
+  padding:9px 12px;font-size:13px;font-family:inherit;outline:none;transition:.15s;width:100%}
+input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,124,255,.15)}
+.switch{position:relative;width:42px;height:24px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:var(--bg2);border:1px solid var(--border);border-radius:999px;cursor:pointer;transition:.2s}
+.slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;border-radius:50%;background:var(--muted);transition:.2s}
+.switch input:checked+.slider{background:rgba(79,124,255,.35);border-color:var(--accent)}
+.switch input:checked+.slider:before{transform:translateX(18px);background:#fff}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px}
+.stat .v{font-size:22px;font-weight:700;color:var(--cyan)}
+.stat .v.ok{color:var(--ok)}.stat .v.warn{color:var(--warn)}
+.stat .k{font-size:12px;color:var(--muted);margin-top:2px}
+.progress{height:10px;background:var(--bg2);border-radius:999px;overflow:hidden;border:1px solid var(--border)}
+.progress>div{height:100%;background:linear-gradient(90deg,var(--accent),var(--cyan));border-radius:999px;transition:width .4s;width:0}
+#logbox{background:#0a0f22;border:1px solid var(--border);border-radius:12px;padding:14px;
+  font-family:"JetBrains Mono",Consolas,monospace;font-size:12px;line-height:1.75;
+  height:340px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+#logbox .t{color:var(--dim)}
+#logbox .hl{color:var(--cyan)}
+#logbox .ok{color:var(--ok)}
+#logbox .err{color:var(--err)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tbody tr:hover{background:rgba(79,124,255,.05)}
+.url-cell{max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
+.tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
+.tag.ok{background:rgba(16,185,129,.15);color:#34d399}
+.tag.off{background:rgba(90,102,143,.2);color:var(--muted)}
+.tag.err{background:rgba(239,68,68,.15);color:#f87171}
+.preset{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.preset button{background:var(--bg2);border:1px solid var(--border);color:var(--muted);padding:5px 12px;font-size:12px}
+.preset button:hover{color:var(--text);border-color:var(--accent)}
+.nextrun{margin-top:12px;font-size:12px;color:var(--muted);line-height:1.9}
+.nextrun b{color:var(--cyan);font-weight:600}
+.toast{position:fixed;top:20px;right:20px;z-index:99;padding:12px 18px;border-radius:12px;
+  font-size:13px;font-weight:600;color:#fff;opacity:0;transition:.3s;pointer-events:none;max-width:380px}
+.toast.show{opacity:1}
+.toast.ok{background:rgba(16,185,129,.92)}
+.toast.err{background:rgba(239,68,68,.92)}
+.empty{color:var(--dim);text-align:center;padding:30px 0;font-size:13px}
+.runrow{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;cursor:pointer;transition:.15s}
+.runrow:hover{border-color:var(--accent)}
+.runrow .meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--muted)}
+.dl{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:8px;font-size:12px;
+  background:rgba(79,124,255,.12);border:1px solid rgba(79,124,255,.35);color:#8fb0ff;cursor:pointer;text-decoration:none}
+.dl:hover{background:rgba(79,124,255,.22)}
+pre.code{background:#0a0f22;border:1px solid var(--border);border-radius:10px;padding:12px;
+  font-family:Consolas,monospace;font-size:12px;overflow:auto;max-height:320px;white-space:pre}
+footer{text-align:center;color:var(--dim);font-size:12px;margin-top:30px}
+.section-title{margin:22px 0 10px;font-size:13px;color:var(--muted);font-weight:700;letter-spacing:1px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">⚡</div>
+    <div>
+      <h1>CFData 优选管理平台</h1>
+      <div class="sub">多源测速 · 定时任务 · 自动提取 Top 节点（TXT + Clash YAML）</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="badge idle" id="statusBadge"><span class="dot"></span>空闲</span>
+    <button class="btn-primary" id="btnRun" onclick="triggerRun()">▶ 手动运行</button>
+    <button class="btn-danger" id="btnCancel" onclick="cancelRun()" style="display:none">■ 取消任务</button>
+  </header>
+
+  <nav>
+    <button class="active" data-tab="tab-run" onclick="switchTab('tab-run',this)">📊 运行状态</button>
+    <button data-tab="tab-src" onclick="switchTab('tab-src',this)">🌐 API 源管理</button>
+    <button data-tab="tab-cron" onclick="switchTab('tab-cron',this)">⏰ 定时任务</button>
+    <button data-tab="tab-set" onclick="switchTab('tab-set',this)">⚙️ 参数设置</button>
+    <button data-tab="tab-res" onclick="switchTab('tab-res',this)">📁 运行结果</button>
+  </nav>
+
+  <!-- 运行状态 -->
+  <div id="tab-run">
+    <div class="stats">
+      <div class="stat"><div class="v" id="stPhase">—</div><div class="k">任务状态</div></div>
+      <div class="stat"><div class="v" id="stSource">—</div><div class="k">当前测试源</div></div>
+      <div class="stat"><div class="v ok" id="stProgress">0 / 0</div><div class="k">源进度</div></div>
+      <div class="stat"><div class="v warn" id="stLast">—</div><div class="k">上次结果</div></div>
+    </div>
+    <div class="card">
+      <h2>实时日志</h2>
+      <div class="desc">cfdata 测试过程输出（扫描进度 / 测速 / 排序结果）</div>
+      <div style="margin-bottom:10px" class="progress"><div id="progBar"></div></div>
+      <div id="logbox"><span class="t">等待任务运行… 点击右上角「手动运行」或配置定时任务后自动执行。</span></div>
+    </div>
+  </div>
+
+  <!-- API 源管理 -->
+  <div id="tab-src" style="display:none">
+    <div class="card">
+      <h2>添加 API 源</h2>
+      <div class="desc">对应命令行参数 <b>-nsbsourceurl</b>，支持配置多个，任务将按顺序逐个测试后合并排序</div>
+      <div class="grid g2">
+        <div class="field"><label>源名称</label><input type="text" id="srcName" placeholder="例如: HK 优选"></div>
+        <div class="field"><label>API 地址 (http/https)</label>
+          <input type="text" id="srcUrl" placeholder="https://bestcf.pages.dev/random-region/HK/all.txt"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn-primary" onclick="addSource()">＋ 添加源</button></div>
+    </div>
+    <div class="card">
+      <h2>已配置的 API 源 <span id="srcCount" style="color:var(--muted);font-size:12px"></span></h2>
+      <table>
+        <thead><tr><th style="width:50px">启用</th><th style="width:160px">名称</th><th>API 地址</th><th style="width:90px">操作</th></tr></thead>
+        <tbody id="srcBody"><tr><td colspan="4" class="empty">暂无数据</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 定时任务 -->
+  <div id="tab-cron" style="display:none">
+    <div class="card">
+      <h2>Cron 定时任务</h2>
+      <div class="desc">标准 5 段 cron 表达式（分 时 日 月 周），到点后自动按顺序测试所有已启用的 API 源</div>
+      <div class="row" style="margin-bottom:16px">
+        <label class="switch"><input type="checkbox" id="cronEnabled"><span class="slider"></span></label>
+        <span style="font-weight:600" id="cronEnabledText">未启用</span>
+      </div>
+      <div class="grid g2">
+        <div class="field">
+          <label>Cron 表达式</label>
+          <input type="text" id="cronExpr" placeholder="0 8 * * *" spellcheck="false">
+          <div class="hint" id="cronDesc"></div>
+        </div>
+        <div class="field">
+          <label>常用预设</label>
+          <select id="cronPreset" onchange="applyPreset(this.value)">
+            <option value="">— 选择预设 —</option>
+            <option value="*/30 * * * *">每 30 分钟</option>
+            <option value="0 * * * *">每小时整点</option>
+            <option value="0 8 * * *">每天 08:00</option>
+            <option value="0 0 * * *">每天 00:00</option>
+            <option value="0 8 * * 1">每周一 08:00</option>
+            <option value="0 9 * * 1-5">工作日 09:00</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:14px"><button class="btn-primary" onclick="saveCron()">保存定时设置</button></div>
+      <div class="nextrun" id="cronNext"></div>
+    </div>
+  </div>
+
+  <!-- 参数设置 -->
+  <div id="tab-set" style="display:none">
+    <div class="card">
+      <h2>测试参数</h2>
+      <div class="desc">对应 cfdata 命令行参数，任务执行时逐项传入</div>
+      <div class="grid g3">
+        <div class="field"><label>测速线程数 (-nsbspeedtest)</label><input type="number" id="sSpeedThreads" min="0" step="1"></div>
+        <div class="field"><label>最低速度 MB/s (-nsbspeedmin)</label><input type="number" id="sSpeedMin" min="0" step="0.1"></div>
+        <div class="field"><label>测速上限 (-nsbspeedlimit)</label><input type="number" id="sSpeedLimit" min="0" step="1"></div>
+        <div class="field"><label>结果上限 (-nsbresultlimit)</label><input type="number" id="sResultLimit" min="1" step="1"></div>
+        <div class="field"><label>扫描并发 (-nsbthreads)</label><input type="number" id="sThreads" min="1" step="1"></div>
+        <div class="field"><label>IP 类型 (-nsbiptype)</label>
+          <select id="sIpType"><option value="all">全部 (all)</option><option value="ipv4">仅 IPv4</option><option value="ipv6">仅 IPv6</option></select></div>
+        <div class="field"><label>提取前 N 个节点</label><input type="number" id="sTopN" min="1" step="1"></div>
+        <div class="field"><label>单源超时(分钟, 0=不限)</label><input type="number" id="sTimeout" min="0" step="1"></div>
+        <div class="field"><label>启用 TLS (-nsbtls)</label>
+          <select id="sTls"><option value="true">是</option><option value="false">否</option></select></div>
+        <div class="field"><label>仅导出达标结果 (-nsbqualified)</label>
+          <select id="sQualified"><option value="true">是</option><option value="false">否</option></select></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>节点模板（Clash YAML 格式化）</h2>
+      <div class="desc">测试完成后的 Top 节点将按此模板生成 trojan 节点配置，格式与附件示例一致</div>
+      <div class="grid g3">
+        <div class="field"><label>节点名模板</label><input type="text" id="nTemplate">
+          <div class="hint">可用: {dc} {loc} {region} {speed} {latency} {ip} {port}</div></div>
+        <div class="field"><label>password</label><input type="text" id="nPassword"></div>
+        <div class="field"><label>sni</label><input type="text" id="nSni"></div>
+        <div class="field"><label>ws Host</label><input type="text" id="nHost"></div>
+        <div class="field"><label>ws path</label><input type="text" id="nPath"></div>
+        <div class="field"><label>client-fingerprint</label><input type="text" id="nFp"></div>
+        <div class="field"><label>skip-cert-verify</label>
+          <select id="nSkip"><option value="false">false</option><option value="true">true</option></select></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>cfdata 二进制</h2>
+      <div class="desc">优先在应用目录查找 cfdata-linux-amd64，也可手动指定绝对路径</div>
+      <div class="grid g2">
+        <div class="field"><label>二进制路径（留空=自动检测）</label><input type="text" id="sBinary" placeholder="/opt/cfdata/cfdata-linux-amd64"></div>
+        <div class="field"><label>当前检测</label><div id="binaryInfo" class="hint" style="padding-top:8px"></div></div>
+      </div>
+      <div style="margin-top:14px"><button class="btn-primary" onclick="saveSettings()">💾 保存全部设置</button></div>
+    </div>
+  </div>
+
+  <!-- 运行结果 -->
+  <div id="tab-res" style="display:none">
+    <div class="card">
+      <h2>历史运行结果</h2>
+      <div class="desc">每次任务完成后保存 Top 节点（TXT + Clash YAML 两种格式）与全量排序结果</div>
+      <div id="runsList"><div class="empty">暂无运行记录</div></div>
+    </div>
+    <div class="card" id="runDetailCard" style="display:none">
+      <h2 id="runDetailTitle">运行详情</h2>
+      <div id="runDetail"></div>
+    </div>
+  </div>
+
+  <footer>CFData 优选管理平台 · Python + cfdata · 输出目录 results/</footer>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let logSeq = 0, pollTimer = null, curTab = 'tab-run', stateCache = null;
+
+function $(id){return document.getElementById(id)}
+function toast(msg, ok=true){
+  const t = $('toast');
+  t.textContent = msg; t.className = 'toast show ' + (ok?'ok':'err');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.className='toast', 3000);
+}
+async function api(path, opts={}){
+  const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
+  const j = await r.json().catch(()=>({ok:false,error:'响应解析失败'}));
+  if(!j.ok && j.error) throw new Error(j.error);
+  return j;
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+
+/* ---------- Tab ---------- */
+function switchTab(id, btn){
+  document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  ['tab-run','tab-src','tab-cron','tab-set','tab-res'].forEach(t=>$(t).style.display = t===id?'':'none');
+  curTab = id;
+  if(id==='tab-res') loadRuns();
+  if(id==='tab-src') loadSources();
+  if(id==='tab-cron') loadCronState();
+}
+
+/* ---------- 状态轮询 ---------- */
+async function pollState(){
+  try{
+    const j = await api('/api/state');
+    stateCache = j.data;
+    renderState(j.data);
+    await pollLog();
+  }catch(e){ console.warn(e) }
+}
+async function pollLog(){
+  try{
+    const j = await api('/api/status?after='+logSeq);
+    const d = j.data;
+    if(d.lines.length){
+      const box = $('logbox');
+      if(logSeq===0) box.innerHTML='';
+      for(const line of d.lines){
+        const div = document.createElement('div');
+        let cls='';
+        if(/完成|成功|Top\d|任务开始|已保存/.test(line)) cls='ok';
+        else if(/失败|异常|取消|超时|错误/.test(line)) cls='err';
+        else if(/开始测试|开始扫描|开始测速/.test(line)) cls='hl';
+        div.className = cls;
+        div.textContent = line;
+        box.appendChild(div);
+      }
+      logSeq = d.seq;
+      while(box.children.length>800) box.removeChild(box.firstChild);
+      box.scrollTop = box.scrollHeight;
+    }
+  }catch(e){}
+}
+function renderState(d){
+  const badge = $('statusBadge');
+  if(d.running){
+    badge.className='badge run'; badge.innerHTML='<span class="dot"></span>运行中';
+    $('btnRun').disabled = true; $('btnCancel').style.display='';
+  }else{
+    const ok = d.phase!=='error' && d.phase!=='canceled';
+    badge.className='badge '+(ok?'idle':'err');
+    badge.innerHTML='<span class="dot"></span>'+(d.phase==='error'?'异常':d.phase==='canceled'?'已取消':'空闲');
+    $('btnRun').disabled = false; $('btnCancel').style.display='none';
+  }
+  const phaseMap={idle:'空闲',preparing:'准备中',running:'运行中',finishing:'汇总排序',done:'已完成',error:'失败',canceled:'已取消'};
+  $('stPhase').textContent = phaseMap[d.phase]||d.phase;
+  $('stSource').textContent = d.current_source || '—';
+  $('stProgress').textContent = d.progress.done+' / '+d.progress.total;
+  const pct = d.progress.total>0 ? Math.round(d.progress.done/d.progress.total*100) : 0;
+  $('progBar').style.width = pct+'%';
+  if(d.last_run){
+    const st={success:'成功',error:'失败',canceled:'取消'}[d.last_run.status]||d.last_run.status;
+    $('stLast').textContent = st+' · '+d.last_run.top_count+'节点';
+  }
+}
+
+/* ---------- 手动运行 ---------- */
+async function triggerRun(){
+  try{
+    const j = await api('/api/run',{method:'POST'});
+    toast(j.message||'任务已启动');
+    logSeq = 0; $('logbox').innerHTML='';
+    switchTab('tab-run', document.querySelector('nav button'));
+    pollState();
+  }catch(e){ toast(e.message,false) }
+}
+async function cancelRun(){
+  try{
+    const j = await api('/api/cancel',{method:'POST'});
+    toast(j.message, j.ok);
+  }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- API 源 ---------- */
+async function loadSources(){
+  try{
+    const j = await api('/api/sources');
+    const body = $('srcBody');
+    if(!j.data.length){ body.innerHTML='<tr><td colspan="4" class="empty">暂无数据，请先添加 API 源</td></tr>'; }
+    else{
+      body.innerHTML = j.data.map(s=>`
+        <tr>
+          <td><label class="switch"><input type="checkbox" ${s.enabled?'checked':''} onchange="toggleSource('${s.id}',this.checked)"><span class="slider"></span></label></td>
+          <td>${esc(s.name)}</td>
+          <td class="url-cell" title="${esc(s.url)}">${esc(s.url)}</td>
+          <td><button class="btn-danger btn-sm" onclick="delSource('${s.id}','${esc(s.name)}')">删除</button></td>
+        </tr>`).join('');
+    }
+    $('srcCount').textContent = `（共 ${j.data.length} 个）`;
+  }catch(e){ toast(e.message,false) }
+}
+async function addSource(){
+  const name=$('srcName').value.trim(), url=$('srcUrl').value.trim();
+  if(!url){ toast('请填写 API 地址',false); return }
+  try{
+    await api('/api/sources',{method:'POST',body:JSON.stringify({name,url,enabled:true})});
+    toast('已添加 API 源');
+    $('srcName').value=''; $('srcUrl').value='';
+    loadSources(); pollState();
+  }catch(e){ toast(e.message,false) }
+}
+async function toggleSource(id,enabled){
+  try{ await api('/api/sources/'+id,{method:'POST',body:JSON.stringify({enabled})}); pollState(); }
+  catch(e){ toast(e.message,false); loadSources(); }
+}
+async function delSource(id,name){
+  if(!confirm('确定删除源「'+name+'」？')) return;
+  try{
+    await api('/api/sources/'+id,{method:'DELETE'});
+    toast('已删除'); loadSources(); pollState();
+  }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- 定时任务 ---------- */
+function loadCronState(){
+  if(!stateCache) return;
+  $('cronEnabled').checked = stateCache.cron.enabled;
+  $('cronExpr').value = stateCache.cron.expr||'';
+  renderCronInfo(stateCache.cron);
+}
+function renderCronInfo(c){
+  $('cronEnabledText').textContent = c.enabled?'已启用':'未启用';
+  $('cronDesc').textContent = c.valid ? ('含义: '+c.description) : (c.error?('表达式无效: '+c.error):'');
+  $('cronNext').innerHTML = (c.enabled && c.next_runs && c.next_runs.length)
+    ? '⏭️ 接下来 3 次运行时间：<br>' + c.next_runs.map(t=>'<b>'+t+'</b>').join('<br>')
+    : (c.enabled?'启用后显示下次运行时间':'');
+}
+function applyPreset(v){ if(v){ $('cronExpr').value=v; } }
+async function saveCron(){
+  try{
+    const j = await api('/api/cron',{method:'POST',
+      body:JSON.stringify({enabled:$('cronEnabled').checked, expr:$('cronExpr').value.trim()})});
+    renderCronInfo(j.data);
+    toast('定时任务设置已保存');
+  }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- 参数设置 ---------- */
+async function loadSettings(){
+  try{
+    const j = await api('/api/settings'); const s = j.data, n = s.node||{};
+    $('sSpeedThreads').value=s.speedtest_threads; $('sSpeedMin').value=s.speed_min;
+    $('sSpeedLimit').value=s.speed_limit; $('sResultLimit').value=s.result_limit;
+    $('sThreads').value=s.threads; $('sIpType').value=s.ip_type; $('sTopN').value=s.top_n;
+    $('sTimeout').value=s.timeout_minutes; $('sTls').value=String(!!s.tls);
+    $('sQualified').value=String(!!s.qualified);
+    $('nTemplate').value=n.name_template; $('nPassword').value=n.password;
+    $('nSni').value=n.sni; $('nHost').value=n.host; $('nPath').value=n.path;
+    $('nFp').value=n.client_fingerprint||'chrome'; $('nSkip').value=String(!!n.skip_cert_verify);
+    $('sBinary').value=s.binary_path||'';
+    const b = await api('/api/binary');
+    $('binaryInfo').innerHTML = b.data.found
+      ? '✅ 已找到: <b>'+esc(b.data.path)+'</b>'
+      : '❌ 未找到 cfdata 可执行文件，请填写路径';
+  }catch(e){ toast(e.message,false) }
+}
+async function saveSettings(){
+  const body = {
+    speedtest_threads:+$('sSpeedThreads').value, speed_min:+$('sSpeedMin').value,
+    speed_limit:+$('sSpeedLimit').value, result_limit:+$('sResultLimit').value,
+    threads:+$('sThreads').value, ip_type:$('sIpType').value, top_n:+$('sTopN').value,
+    timeout_minutes:+$('sTimeout').value, tls:$('sTls').value==='true',
+    qualified:$('sQualified').value==='true', binary_path:$('sBinary').value.trim(),
+    node:{
+      name_template:$('nTemplate').value.trim(), password:$('nPassword').value,
+      sni:$('nSni').value.trim(), host:$('nHost').value.trim(), path:$('nPath').value,
+      client_fingerprint:$('nFp').value.trim()||'chrome', skip_cert_verify:$('nSkip').value==='true'
+    }
+  };
+  try{
+    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    toast('设置已保存');
+    const b = await api('/api/binary');
+    $('binaryInfo').innerHTML = b.data.found?'✅ 已找到: <b>'+esc(b.data.path)+'</b>':'❌ 未找到可执行文件';
+  }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- 运行结果 ---------- */
+async function loadRuns(){
+  try{
+    const j = await api('/api/runs');
+    const box = $('runsList');
+    if(!j.data.length){ box.innerHTML='<div class="empty">暂无运行记录</div>'; return }
+    box.innerHTML = j.data.map(r=>{
+      const st={success:'ok',error:'err',canceled:'off'}[r.status]||'off';
+      const stTxt={success:'成功',error:'失败',canceled:'取消'}[r.status]||r.status;
+      const tr = r.trigger==='cron'?'定时':'手动';
+      return `<div class="runrow" onclick="showRun('${r.id}')">
+        <div class="row">
+          <b>${r.id}</b>
+          <span class="tag ${st}">${stTxt}</span>
+          <span class="tag off">${tr}</span>
+          <div class="spacer"></div>
+          <span style="font-size:12px;color:var(--muted)">${esc(r.started_at||'')} → ${esc(r.finished_at||'…')}</span>
+        </div>
+        <div class="meta" style="margin-top:6px">
+          <span>源结果总数: <b style="color:var(--text)">${r.total_nodes??'-'}</b></span>
+          <span>提取节点: <b style="color:var(--cyan)">${r.top_count??'-'}</b></span>
+          ${r.files?`<a class="dl" href="/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT</a>
+          <a class="dl" href="/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML</a>
+          <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量</a>`:''}
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){ toast(e.message,false) }
+}
+async function showRun(id){
+  try{
+    const j = await api('/api/runs/'+id); const r = j.data;
+    $('runDetailCard').style.display='';
+    $('runDetailTitle').textContent = '运行详情 · '+r.id;
+    const srcRows = (r.sources||[]).map(s=>`
+      <tr><td>${esc(s.name)}</td><td class="url-cell">${esc(s.url)}</td>
+      <td>${s.ok?'<span class="tag ok">成功</span>':'<span class="tag err">失败</span>'}</td>
+      <td>${s.count??'-'}</td><td>${s.elapsed_sec??'-'}s</td></tr>`).join('');
+    const nodes = (r.top_nodes||[]).map(n=>`
+      <tr><td>${n.rank}</td><td><b>${esc(n.name)}</b></td><td>${esc(n.server)}:${n.port}</td>
+      <td style="color:var(--ok)">${esc(n.speed)}</td><td>${esc(n.latency)}</td><td>${esc(n.dc||'-')} / ${esc(n.loc||'-')}</td></tr>`).join('');
+    $('runDetail').innerHTML = `
+      <div class="section-title">各源测试情况</div>
+      <table><thead><tr><th>源名称</th><th>API 地址</th><th>状态</th><th>节点数</th><th>耗时</th></tr></thead>
+      <tbody>${srcRows||'<tr><td colspan="5" class="empty">无</td></tr>'}</tbody></table>
+      <div class="section-title">Top ${r.top_count||0} 节点（按速度降序）</div>
+      <table><thead><tr><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
+      <tbody>${nodes||'<tr><td colspan="6" class="empty">无节点</td></tr>'}</tbody></table>
+      ${r.preview&&r.preview.yaml?`<div class="section-title">Clash YAML 预览</div><pre class="code">${esc(r.preview.yaml)}</pre>`:''}`;
+    $('runDetailCard').scrollIntoView({behavior:'smooth'});
+  }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- 初始化 ---------- */
+pollState();
+loadSettings();
+setInterval(pollState, 2500);
+$('cronEnabled').addEventListener('change',()=>renderCronInfo({
+  enabled:$('cronEnabled').checked, valid:true, description:'', next_runs:[]}));
+</script>
+</body>
+</html>

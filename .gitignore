@@ -1,0 +1,21 @@
+# 运行时生成（含节点结果与个人配置，勿提交）
+config.json
+cfdata-config.json
+results/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
