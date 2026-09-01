@@ -79,8 +79,10 @@ cfdata_web/
 ├── cfdata-linux-amd64     # CFData 二进制（测速引擎）
 ├── web/
 │   └── index.html         # Web 界面（单文件，无构建依赖）
-├── config.json            # 运行时自动生成（源/定时/参数配置）
-├── cfdata-config.json     # 运行时自动生成（cfdata CLI 配置）
+├── data/                  # 数据目录（Docker 环境 = 挂载点 /app/data，需挂载持久化）
+│   ├── config.json        # 源/定时/参数配置（本地运行时直接生成在应用目录）
+│   ├── cfdata-config.json # cfdata CLI 配置（本地运行时直接生成在应用目录）
+│   └── locations.json     # 数据中心位置缓存（本地运行时直接生成在应用目录）
 └── results/               # 运行时自动生成
     ├── runs.json          # 运行记录索引
     ├── latest/            # 最新一次成功任务的固定结果目录（自动覆盖更新）
@@ -167,8 +169,10 @@ docker run -d \
 
 | 挂载卷 | 说明 |
 | --- | --- |
-| `/app/results` | 测试结果（TXT/YAML/日志/运行记录） |
-| `/app/data` | 可选，持久化 `config.json` 等配置（配合 `-v cfdata-data:/app/data` 并设置环境变量时用于备份场景） |
+| `/app/results` | 测试结果（TXT/YAML/日志/运行记录/latest 固定目录） |
+| `/app/data` | **必挂**，持久化 `config.json`（API 源列表、定时任务、参数设置）、`cfdata-config.json`、`locations.json` 缓存；不挂载则容器重建后配置丢失 |
+
+> 重要：所有界面上的配置（添加的 API 源、cron 表达式、参数设置、节点模板）都保存在 `/app/data/config.json`，务必挂载该目录，否则 `docker rm` 后重建容器配置会重置为默认值。旧版本配置存放在容器内 `/app/config.json`，升级镜像后会自动迁移到 `/app/data`。
 
 本地构建镜像：
 

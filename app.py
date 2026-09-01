@@ -32,11 +32,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(APP_DIR, 'config.json')
 RESULTS_DIR = os.path.join(APP_DIR, 'results')
 WEB_DIR = os.path.join(APP_DIR, 'web')
-CFDATA_CONFIG_PATH = os.path.join(APP_DIR, 'cfdata-config.json')
 RUNS_INDEX_PATH = os.path.join(RESULTS_DIR, 'runs.json')
+
+# 数据目录(存放可持久化状态): Docker 环境使用挂载点 /app/data, 本地运行回退到应用目录
+# 可用环境变量 CFDATA_DATA_DIR 覆盖
+_env_data = os.environ.get('CFDATA_DATA_DIR')
+if _env_data:
+    DATA_DIR = _env_data
+elif os.path.isdir('/app/data'):
+    DATA_DIR = '/app/data'
+else:
+    DATA_DIR = APP_DIR
+CONFIG_PATH = os.path.join(DATA_DIR, 'config.json')
+CFDATA_CONFIG_PATH = os.path.join(DATA_DIR, 'cfdata-config.json')
+LOCATIONS_CACHE_PATH = os.path.join(DATA_DIR, 'locations.json')
 # 固定的"最新结果"目录: 每次任务成功后同步覆盖, 路径不变便于外部订阅
 LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
 LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt',
@@ -98,6 +109,25 @@ def now_str(fmt='%Y-%m-%d %H:%M:%S'):
 
 def new_id(prefix):
     return '%s_%s' % (prefix, uuid.uuid4().hex[:10])
+
+
+def migrate_legacy_state():
+    """把旧位置(应用目录)的持久化文件迁移到数据目录; 仅在数据目录缺少对应文件时执行"""
+    if os.path.realpath(DATA_DIR) == os.path.realpath(APP_DIR):
+        return []
+    moved = []
+    for name, dst in (('config.json', CONFIG_PATH),
+                      ('cfdata-config.json', CFDATA_CONFIG_PATH),
+                      ('locations.json', LOCATIONS_CACHE_PATH)):
+        src = os.path.join(APP_DIR, name)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                os.makedirs(DATA_DIR, exist_ok=True)
+                shutil.copyfile(src, dst)
+                moved.append(name)
+            except Exception:
+                pass
+    return moved
 
 
 def deep_merge(base, override):
@@ -188,6 +218,10 @@ class ConfigStore:
 
     def save(self):
         with self._lock:
+            try:
+                os.makedirs(DATA_DIR, exist_ok=True)
+            except Exception:
+                pass
             tmp = CONFIG_PATH + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self._cfg, f, ensure_ascii=False, indent=2)
@@ -758,7 +792,7 @@ class TaskRunner:
         log('%s 开始测试: %s' % (label, src['url']))
         proc = None
         # 复用已缓存的 locations.json, 避免每次运行都重新下载数据中心位置信息
-        cached_locations = os.path.join(APP_DIR, 'locations.json')
+        cached_locations = LOCATIONS_CACHE_PATH
         if os.path.exists(cached_locations):
             try:
                 shutil.copyfile(cached_locations, os.path.join(run_dir, 'locations.json'))
@@ -1139,6 +1173,13 @@ class CronScheduler(threading.Thread):
 
 
 # ---------------------------------------------------------------- HTTP 服务
+# 先确保数据目录存在(挂载点可能是空目录或未创建), 再迁移旧位置的状态文件,
+# 最后加载配置(保证 ConfigStore 读到迁移后的文件)
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception as e:
+    sys.stderr.write('数据目录创建失败(%s): %s\n' % (DATA_DIR, e))
+MIGRATED_FILES = migrate_legacy_state()
 STORE = ConfigStore()
 RUNNER = TaskRunner(STORE)
 SCHEDULER = CronScheduler(STORE, RUNNER)
@@ -1346,8 +1387,11 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         try:
             if path == '/api/sources':
-                src = STORE.add_source(body.get('name', ''), body.get('url', ''),
-                                       bool(body.get('enabled', True)))
+                try:
+                    src = STORE.add_source(body.get('name', ''), body.get('url', ''),
+                                           bool(body.get('enabled', True)))
+                except ValueError as e:
+                    return self._json({'ok': False, 'error': str(e)}, 400)
                 return self._json({'ok': True, 'data': src})
             m = re.fullmatch(r'/api/sources/([\w.:-]+)', path)
             if m:
@@ -1412,6 +1456,15 @@ def main():
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(WEB_DIR, exist_ok=True)
+
+    # 旧版本把配置放在应用目录(容器内 /app), 迁移到数据目录以支持 Docker 挂载持久化
+    if MIGRATED_FILES:
+        print('[init] 已迁移旧配置到数据目录: %s (%s)' % (DATA_DIR, ', '.join(MIGRATED_FILES)))
+
+    print('[init] 配置文件: %s (%s)' % (
+        CONFIG_PATH, '已存在' if os.path.exists(CONFIG_PATH) else '将使用默认配置'))
+    print('[init] 数据目录: %s%s' % (
+        DATA_DIR, '' if DATA_DIR == APP_DIR else ' (已持久化, 重启不丢失)'))
 
     # 启动时预生成 cfdata 配置文件, 避免首次正式任务被中断
     binary = RUNNER.locate_binary()

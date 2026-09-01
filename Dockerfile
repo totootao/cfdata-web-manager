@@ -12,7 +12,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /app/results /app/web
+    && mkdir -p /app/results /app/data /app/web
 
 COPY app.py /app/app.py
 COPY web/ /app/web/
