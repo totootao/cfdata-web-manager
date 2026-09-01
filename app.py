@@ -374,7 +374,9 @@ class TaskRunner:
         # 进度正则: cfdata CLI 输出
         self._re_scan_start = re.compile(r'开始扫描：(\d+)\s*个地址')
         self._re_speed_start = re.compile(r'开始(?:非标)?测速：(\d+)\s*条记录')
-        self._re_speed_line = re.compile(r'\[speed\].*?\[(\d+)/(\d+)[\s\d.]*%\]')
+        # [speed] [x/9999 0.23%] IP:PORT 速度 —— 分母 9999 是 -nsbspeedlimit(达标上限)而非真实待测总数
+        self._re_speed_line = re.compile(r'(\[speed\]\s*)\[(\d+)/(\d+)[\s\d.]*%\]\s*(\S+)\s+(\S+)')
+        self._re_speed_done = re.compile(r'(?:非标|官方)批量测速完成，达标\s*(\d+)/(\d+)，总达标\s*(\d+)')
         self._re_scan_line = re.compile(r'\[scan-result\]\s*\[(\d+)/(\d+)[\s\d.]*%\]')
 
     # ---- 状态 ----
@@ -382,29 +384,49 @@ class TaskRunner:
         with self._lock:
             return dict(self.state)
 
-    def _track_progress(self, text):
-        """解析 cfdata CLI 输出行, 更新当前源的扫描/测速子进度"""
+    def _track_progress(self, text, settings=None):
+        """解析 cfdata CLI 输出行, 更新当前源的扫描/测速子进度。
+
+        cfdata 非标测速输出 [speed] [x/9999 x%], 其中分母 9999 是 -nsbspeedlimit
+        (达标结果上限)而非实际待测总数 —— 真实总数在 '开始测速：N 条记录' 一行。
+        此处把误导性分母重写为真实总数, 使日志与子进度条一致。
+        返回值: 重写后的展示文本; None 表示按原文展示。"""
         if not text:
-            return
+            return None
         try:
             m = self._re_speed_start.search(text)
             if m:
-                total = int(m.group(1))
-                self._set(speed_total=total, speed_tested=0, speed_qualified=0)
-                return
+                self._set(speed_total=int(m.group(1)), speed_tested=0, speed_qualified=0)
+                return None
             m = self._re_scan_start.search(text)
             if m:
                 self._set(scan_total=int(m.group(1)), scan_done=0)
-                return
+                return None
+            m = self._re_speed_done.search(text)
+            if m:
+                with self._lock:
+                    self.state['speed_qualified'] = int(m.group(1))
+                return None
             if '[speed]' in text:
                 m = self._re_speed_line.search(text)
-                qualified = int(m.group(1)) if m else None
+                try:
+                    speed_min = float((settings or {}).get('speed_min') or 0)
+                except (TypeError, ValueError):
+                    speed_min = 0.0
                 with self._lock:
                     st = self.state
                     st['speed_tested'] = st.get('speed_tested', 0) + 1
-                    if qualified is not None:
-                        st['speed_qualified'] = qualified
-                return
+                    total = st.get('speed_total') or 0
+                    tested = st.get('speed_tested') or 0
+                    if m:
+                        spd = parse_speed_mb(m.group(5) or '')
+                        if spd is not None and spd >= speed_min:
+                            st['speed_qualified'] = st.get('speed_qualified', 0) + 1
+                if m and total > 0:
+                    pct = min(100.0, tested / float(total) * 100.0)
+                    return self._re_speed_line.sub(lambda _m: '%s[%d/%d %.2f%%] %s %s' % (
+                        _m.group(1), tested, total, pct, _m.group(4), _m.group(5)), text, count=1)
+                return None
             m = self._re_scan_line.search(text)
             if m:
                 with self._lock:
@@ -412,6 +434,7 @@ class TaskRunner:
                     self.state['scan_total'] = int(m.group(2)) or self.state.get('scan_total', 0)
         except Exception:
             pass
+        return None
 
     def _reset_sub_progress(self):
         self._set(scan_done=0, scan_total=0,
@@ -658,7 +681,7 @@ class TaskRunner:
             with self._lock:
                 self._proc = proc
             timeout = float(settings.get('timeout_minutes') or 0) * 60
-            self._stream_output(proc, log, label, timeout)
+            self._stream_output(proc, log, label, timeout, settings)
             code = proc.wait()
             elapsed = time.time() - started
             if self._cancel:
@@ -698,7 +721,7 @@ class TaskRunner:
                 except Exception:
                     pass
 
-    def _stream_output(self, proc, log, label, timeout_sec):
+    def _stream_output(self, proc, log, label, timeout_sec, settings=None):
         """流式读取子进程输出, 兼容 \\r 进度刷新, 带超时与取消"""
         fd = proc.stdout.fileno()
         import select
@@ -736,14 +759,15 @@ class TaskRunner:
             for p in parts:
                 text = p.decode('utf-8', errors='replace').strip()
                 if text:
-                    self._track_progress(text)
-                    log('%s | %s' % (label, text))
+                    display = self._track_progress(text, settings)
+                    log('%s | %s' % (label, display if display is not None else text))
             if time.time() - last_keepalive > 30:
                 last_keepalive = time.time()
         # 冲刷剩余
         text = buf.decode('utf-8', errors='replace').strip()
         if text:
-            log('%s | %s' % (label, text))
+            display = self._track_progress(text, settings)
+            log('%s | %s' % (label, display if display is not None else text))
 
     @staticmethod
     def _parse_csv(path):

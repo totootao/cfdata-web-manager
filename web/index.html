@@ -403,7 +403,7 @@ function renderState(d){
     const p = Math.min(100, Math.round(sp.tested/sp.total*100));
     wrap.style.display='';
     $('subProgressLabel').textContent = '⚡ 测速进度（'+srcTag+'）';
-    $('subProgressText').textContent = sp.tested+' / '+sp.total+'（'+p+'%）· 达标 '+sp.qualified;
+    $('subProgressText').textContent = '已测 '+sp.tested+' / 共 '+sp.total+'（'+p+'%）· 达标 '+sp.qualified;
     $('subProgBar').style.width = p+'%';
   }else if(d.scan_progress && d.scan_progress.total>0){
     const sc = d.scan_progress;
