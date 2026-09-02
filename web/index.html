@@ -264,7 +264,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     </div>
     <div class="card">
       <h2>Top 节点质检定时</h2>
-      <div class="desc">到点后仅复测 <b>results/latest/</b> 的 Top 节点（-nsbfile 本地复测，秒级完成），低于速度阈值（复用参数设置的最低速度）的节点从 top_nodes.txt/.yaml 剔除；适合在两次完整任务之间高频保鲜订阅列表</div>
+      <div class="desc">到点后对完整任务提取的<b>原始 Top 节点</b>全量复测（latest/qa_input.txt 基准，-nsbfile 本地复测，秒级完成，不随剔除缩小），低于速度阈值（复用参数设置的最低速度）的节点从 top_nodes.txt/.yaml 剔除，速度恢复的节点自动回归；适合在两次完整任务之间高频保鲜订阅列表</div>
       <div class="row" style="margin-bottom:16px">
         <label class="switch"><input type="checkbox" id="qaCronEnabled"><span class="slider"></span></label>
         <span style="font-weight:600" id="qaCronEnabledText">未启用</span>
@@ -373,7 +373,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <div class="desc">最新一次成功任务的结果固定保存于 <b>results/latest/</b>，路径永不变化，可直接用于订阅</div>
       <div class="row" style="margin:14px 0 10px">
         <button class="btn-primary" id="btnQa" onclick="triggerQa()">🔍 质检 Top 节点</button>
-        <span class="hint" style="align-self:center">仅复测 latest 的 Top 节点，低于速度阈值的从 top_nodes.txt/.yaml 剔除（不产生新运行记录，不动历史池）</span>
+        <span class="hint" style="align-self:center">每次对完整任务提取的原始 Top 节点全量复测（不随剔除缩小），低于阈值的从 top_nodes.txt/.yaml 剔除，速度恢复自动回归（不产生新运行记录，不动历史池）</span>
       </div>
       <div id="latestBox"><div class="empty">暂无最新结果，请先运行任务</div></div>
     </div>
@@ -686,6 +686,7 @@ async function loadQaRecords(){
       const stTxt={success:'成功',error:'失败',canceled:'取消'}[r.status]||r.status;
       const tr = r.trigger==='cron'?'定时':'手动';
       const pruned = (r.pruned||[]).map(p=>'<code>'+esc(p)+'</code>').join(' ');
+      const revived = (r.revived||[]).map(v=>'<code>'+esc(v)+'</code>').join(' ');
       return `<div class="runrow">
         <div class="row">
           <b>${esc(r.id||'')}</b>
@@ -699,8 +700,10 @@ async function loadQaRecords(){
           <span>保留: <b style="color:var(--ok)">${r.kept??'-'}</b></span>
           <span>未测保留: <b style="color:var(--cyan)">${r.kept_untested??0}</b></span>
           <span>剔除: <b style="color:var(--warn)">${r.pruned_count??0}</b></span>
+          <span>回归: <b style="color:var(--accent2)">${r.revived_count??0}</b></span>
         </div>
         ${r.pruned_count>0?`<div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">剔除节点: ${pruned}</div>`:''}
+        ${r.revived_count>0?`<div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">回归节点(速度恢复): ${revived}</div>`:''}
         ${r.error?`<div class="meta" style="margin-top:4px;font-size:11px;color:var(--err)">${esc(r.error)}</div>`:''}
       </div>`;
     }).join('');
