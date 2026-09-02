@@ -56,6 +56,8 @@ HISTORY_SOURCE_NAME = '历史节点'
 LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
 LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt',
                 'top_by_source.txt', 'top_by_source.yaml')
+# 质检记录(对 latest Top 节点的复测剔除结果), 存放于数据目录以持久化
+QA_RUNS_PATH = os.path.join(DATA_DIR, 'qa_runs.json')
 
 # CSV 导出字段(传给 cfdata -fields), 与中文表头一一对应
 CSV_FIELDS = 'ipport,latency,speed,dc,loc,region,city'
@@ -625,7 +627,8 @@ class TaskRunner:
         self.log = LogBuffer()
         self.state = {
             'running': False,
-            'phase': 'idle',            # idle / preparing / running / finishing / done / error / canceled
+            'phase': 'idle',            # idle / preparing / running / finishing / done / error / canceled / qa
+            'kind': '',                 # task / qa: 当前(最近一次)执行的是什么
             'trigger': '',
             'run_id': '',
             'started_at': None,
@@ -726,6 +729,8 @@ class TaskRunner:
             return False, '没有已启用的 API 源, 请先在「API 源管理」中添加 (%s)' % reason
         with self._lock:
             if self._running:
+                if self.state.get('kind') == 'qa':
+                    return False, '质检正在运行中, 请等待完成后再触发'
                 return False, '任务正在运行中, 请等待完成后再触发'
             self._running = True
             self._cancel = False
@@ -737,6 +742,27 @@ class TaskRunner:
             with self._lock:
                 self._running = False
             return False, '任务启动失败: %s' % e
+
+    def start_qa(self, trigger='manual'):
+        """质检子任务: 仅复测 latest 的 Top 节点, 低于阈值的从 top_nodes 文件剔除"""
+        if not read_latest_top_ipports():
+            return False, '暂无可质检的节点, 请先成功运行一次任务'
+        with self._lock:
+            if self._running:
+                if self.state.get('kind') == 'qa':
+                    return False, '质检正在运行中, 请等待完成后再触发'
+                return False, '任务正在运行中, 请等待完成后再触发'
+            self._running = True
+            self._cancel = False
+        try:
+            t = threading.Thread(target=self._run_qa, args=(trigger,),
+                                 daemon=True, name='qa-runner')
+            t.start()
+            return True, '质检已启动'
+        except Exception as e:
+            with self._lock:
+                self._running = False
+            return False, '质检启动失败: %s' % e
 
     def cancel(self):
         with self._lock:
@@ -792,7 +818,7 @@ class TaskRunner:
     def _run(self, trigger):
         run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.log = LogBuffer()
-        self._set(running=True, phase='preparing', trigger=trigger, run_id=run_id,
+        self._set(running=True, kind='task', phase='preparing', trigger=trigger, run_id=run_id,
                   started_at=now_str(), finished_at=None, current_source='',
                   progress_done=0, progress_total=0, message='')
         logf = None
@@ -1015,15 +1041,8 @@ class TaskRunner:
             'error': reason, 'exit_code': code, 'attempts': attempt,
         }
 
-    def _exec_source_once(self, binary, src, idx, run_dir, settings, log, label):
-        """执行一次 cfdata 测试, 返回 (rows, exit_code, error)
-
-        普通源走 -nsbsourceurl 网络拉取; 历史伪源把池内节点导出为本地文件走 -nsbfile。
-        """
-        out_name = 'source_%02d.csv' % (idx + 1)
-        out_path = os.path.join(run_dir, out_name)
-        if os.path.exists(out_path):
-            os.remove(out_path)  # 清理上次尝试的残留, 避免误读旧结果
+    def _build_cmd(self, binary, settings, out_name, input_name=None, source_url=None):
+        """构造 cfdata 非标测速命令; input_name 走本地文件(-nsbfile), source_url 走网络源"""
         cmd = [
             binary,
             '-cli=true',
@@ -1043,32 +1062,27 @@ class TaskRunner:
             '-nocolor=true',
             '-config=%s' % CFDATA_CONFIG_PATH,
         ]
-        if src.get('is_history'):
-            # 历史伪源: 池内节点导出为本地 ip:port 文件, 复用同一套测速参数
-            input_name = 'history_input.txt'
-            input_path = os.path.join(run_dir, input_name)
-            try:
-                count = HISTORY.export_input_file(input_path)
-            except Exception as e:
-                return [], 1, '导出历史节点输入文件失败: %s' % e
+        if input_name:
             cmd.insert(3, '-nsbfile=%s' % input_name)
-            log('%s 开始测试: 历史节点池 %d 个节点 (本地文件 %s)' % (label, count, input_name))
-        else:
-            cmd.insert(3, '-nsbsourceurl=' + src['url'])
-            log('%s 开始测试: %s' % (label, src['url']))
+        elif source_url:
+            cmd.insert(3, '-nsbsourceurl=' + source_url)
+        return cmd
+
+    def _exec_cmd(self, cmd, work_dir, out_path, settings, log, label):
+        """在工作目录执行一次 cfdata 命令(流式读日志/超时/取消), 返回 (rows, exit_code, error)"""
         proc = None
         # 复用已缓存的 locations.json, 避免每次运行都重新下载数据中心位置信息
         cached_locations = LOCATIONS_CACHE_PATH
         if os.path.exists(cached_locations):
             try:
-                shutil.copyfile(cached_locations, os.path.join(run_dir, 'locations.json'))
+                shutil.copyfile(cached_locations, os.path.join(work_dir, 'locations.json'))
             except Exception:
                 pass
         strict_geo = not bool(settings.get('skip_geo_check', True))
         try:
             # 严格模式下不给输入(交互确认将默认取消); 跳过模式下自动应答 y 作为兜底
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=run_dir,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=work_dir,
                 stdin=subprocess.DEVNULL if strict_geo else subprocess.PIPE)
             if not strict_geo:
                 try:
@@ -1088,7 +1102,7 @@ class TaskRunner:
                 log('%s 进程退出码 %d' % (label, code))
             rows = self._parse_csv(out_path)
             # 回写缓存 locations.json, 供后续运行复用(避免重复下载)
-            run_locations = os.path.join(run_dir, 'locations.json')
+            run_locations = os.path.join(work_dir, 'locations.json')
             if os.path.exists(run_locations):
                 try:
                     shutil.copyfile(run_locations, cached_locations)
@@ -1109,6 +1123,30 @@ class TaskRunner:
                     proc.kill()
                 except Exception:
                     pass
+
+    def _exec_source_once(self, binary, src, idx, run_dir, settings, log, label):
+        """执行一次 cfdata 测试, 返回 (rows, exit_code, error)
+
+        普通源走 -nsbsourceurl 网络拉取; 历史伪源把池内节点导出为本地文件走 -nsbfile。
+        """
+        out_name = 'source_%02d.csv' % (idx + 1)
+        out_path = os.path.join(run_dir, out_name)
+        if os.path.exists(out_path):
+            os.remove(out_path)  # 清理上次尝试的残留, 避免误读旧结果
+        if src.get('is_history'):
+            # 历史伪源: 池内节点导出为本地 ip:port 文件, 复用同一套测速参数
+            input_name = 'history_input.txt'
+            input_path = os.path.join(run_dir, input_name)
+            try:
+                count = HISTORY.export_input_file(input_path)
+            except Exception as e:
+                return [], 1, '导出历史节点输入文件失败: %s' % e
+            cmd = self._build_cmd(binary, settings, out_name, input_name=input_name)
+            log('%s 开始测试: 历史节点池 %d 个节点 (本地文件 %s)' % (label, count, input_name))
+        else:
+            cmd = self._build_cmd(binary, settings, out_name, source_url=src['url'])
+            log('%s 开始测试: %s' % (label, src['url']))
+        return self._exec_cmd(cmd, run_dir, out_path, settings, log, label)
 
     def _stream_output(self, proc, log, label, timeout_sec, settings=None):
         """流式读取子进程输出, 兼容 \\r 进度刷新, 带超时与取消"""
@@ -1190,6 +1228,22 @@ class TaskRunner:
         return rows
 
     # ---- 输出生成 ----
+    def _yaml_node(self, f, r, name, node_cfg):
+        """向已打开的 YAML 文件写入一个 Clash 代理节点块"""
+        f.write('  - name: %s\n' % yaml_value(name))
+        f.write('    server: %s\n' % yaml_value(r['ip']))
+        f.write('    port: %s\n' % r['port'])
+        f.write('    type: trojan\n')
+        f.write('    password: %s\n' % yaml_value(node_cfg.get('password', '')))
+        f.write('    sni: %s\n' % yaml_value(node_cfg.get('sni', '')))
+        f.write('    client-fingerprint: %s\n' % yaml_value(node_cfg.get('client_fingerprint', 'chrome')))
+        f.write('    skip-cert-verify: %s\n' % ('true' if node_cfg.get('skip_cert_verify') else 'false'))
+        f.write('    network: ws\n')
+        f.write('    ws-opts:\n')
+        f.write('      path: %s\n' % yaml_value(node_cfg.get('path', '/')))
+        f.write('      headers:\n')
+        f.write('        Host: %s\n' % yaml_value(node_cfg.get('host', node_cfg.get('sni', ''))))
+
     def _node_fields(self, r, settings):
         dc = r['dc'] or 'CF'
         loc = r['loc'] or 'XX'
@@ -1255,21 +1309,6 @@ class TaskRunner:
     def _write_outputs(self, run_dir, top, merged, per_source_top, settings, log):
         node_cfg = settings.get('node', {})
 
-        def write_node(f, r, name):
-            f.write('  - name: %s\n' % yaml_value(name))
-            f.write('    server: %s\n' % yaml_value(r['ip']))
-            f.write('    port: %s\n' % r['port'])
-            f.write('    type: trojan\n')
-            f.write('    password: %s\n' % yaml_value(node_cfg.get('password', '')))
-            f.write('    sni: %s\n' % yaml_value(node_cfg.get('sni', '')))
-            f.write('    client-fingerprint: %s\n' % yaml_value(node_cfg.get('client_fingerprint', 'chrome')))
-            f.write('    skip-cert-verify: %s\n' % ('true' if node_cfg.get('skip_cert_verify') else 'false'))
-            f.write('    network: ws\n')
-            f.write('    ws-opts:\n')
-            f.write('      path: %s\n' % yaml_value(node_cfg.get('path', '/')))
-            f.write('      headers:\n')
-            f.write('        Host: %s\n' % yaml_value(node_cfg.get('host', node_cfg.get('sni', ''))))
-
         # 格式 1: TXT  ip:port#速度-数据中心-位置 (纯数据行, 无注释)
         txt_path = os.path.join(run_dir, 'top_nodes.txt')
         with open(txt_path, 'w', encoding='utf-8') as f:
@@ -1282,7 +1321,7 @@ class TaskRunner:
         with open(yaml_path, 'w', encoding='utf-8') as f:
             f.write('proxies:\n')
             for r in top:
-                write_node(f, r, self._node_name(r, settings, used_names))
+                self._yaml_node(f, r, self._node_name(r, settings, used_names), node_cfg)
 
         # 附加: 全量排序结果 (纯数据行, 无注释)
         all_path = os.path.join(run_dir, 'all_sorted.txt')
@@ -1310,8 +1349,167 @@ class TaskRunner:
                 for r in g['nodes']:
                     base = self._node_name(r, settings, set())
                     name = unique_name('[%s] %s' % (g['name'], base), used_by)
-                    write_node(f, r, name)
+                    self._yaml_node(f, r, name, node_cfg)
         return txt_path, yaml_path, all_path, by_source_path, by_source_yaml_path
+
+    # ---- 质检子任务 ----
+    def _run_qa(self, trigger):
+        """复测 results/latest/ 的 Top 节点, 低于速度阈值的从 top_nodes.txt/.yaml 剔除
+
+        与主任务共用执行锁; 只重写 latest 的两个 Top 文件并在 meta.json 追加质检信息,
+        不触碰 runs 历史记录、历史节点池与主任务的合并/排序/提取逻辑。
+        """
+        run_id = 'qa_' + datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.log = LogBuffer()
+        self._set(running=True, kind='qa', phase='qa', trigger=trigger, run_id=run_id,
+                  started_at=now_str(), finished_at=None, current_source='质检',
+                  progress_done=0, progress_total=1, message='质检进行中')
+        self._reset_sub_progress()
+        logf = None
+
+        def log(msg):
+            line = '[%s] %s' % (now_str('%H:%M:%S'), msg)
+            self.log.write(line)
+            if logf:
+                logf.write(line + '\n')
+                logf.flush()
+
+        try:
+            cfg = self.store.get()
+            settings = cfg['settings']
+            binary = self.locate_binary()
+            if not binary:
+                raise RuntimeError('未找到 cfdata 可执行文件, 请在「参数设置」中配置二进制路径')
+            self.ensure_cfdata_config(binary)
+
+            work_dir = os.path.join(RESULTS_DIR, run_id)
+            os.makedirs(work_dir, exist_ok=True)
+            logf = open(os.path.join(work_dir, 'qa.log'), 'a', encoding='utf-8')
+            log('===== 质检开始 (%s 触发) =====' % ('定时' if trigger == 'cron' else '手动'))
+
+            ipports_with_note = read_latest_top_lines()
+            if not ipports_with_note:
+                raise RuntimeError('最新结果中没有可质检的节点')
+            ipports = [ipport for ipport, _ in ipports_with_note]
+            try:
+                speed_min = float(settings.get('speed_min') or 0)
+            except (TypeError, ValueError):
+                speed_min = 0.0
+
+            input_name = 'qa_input.txt'
+            with open(os.path.join(work_dir, input_name), 'w', encoding='utf-8') as f:
+                for ipport in ipports:
+                    f.write(ipport + '\n')
+            log('质检输入: latest Top 节点 %d 个 (剔除阈值 %.2f MB/s, 本地文件 %s)'
+                % (len(ipports), speed_min, input_name))
+
+            out_name = 'qa.csv'
+            cmd = self._build_cmd(binary, settings, out_name, input_name=input_name)
+            rows, code, err = self._exec_cmd(cmd, work_dir, os.path.join(work_dir, out_name),
+                                             settings, log, '质检')
+            if self._cancel:
+                raise _CanceledError()
+            if (code != 0) or not rows or err:
+                raise RuntimeError('质检 CLI 执行失败 (退出码 %s, 结果 %d 行%s), latest 保持原样'
+                                   % (code if code is not None else '异常', len(rows),
+                                      ', ' + err if err else ''))
+
+            # 分类: 达标保留 / 低于阈值剔除; 未出现在结果中的节点原样保留(未测不判死刑)
+            by_key = {r['ipport']: r for r in rows}
+            kept, pruned, missed_rows = [], [], []
+            for ipport, note in ipports_with_note:
+                r = by_key.get(ipport)
+                if r is None:
+                    missed_rows.append(_ghost_row(ipport, note))
+                    continue
+                if r['speed'] is not None and r['speed'] >= speed_min:
+                    kept.append(r)
+                else:
+                    pruned.append({'ipport': ipport, 'speed': r['speed_text']})
+            kept.sort(key=lambda r: (-r['speed'], r['latency_ms'] or 0, r['ipport']))
+            # 未测到的节点追加在末尾(按原文件顺序), 不参与速度排序
+            final_rows = kept + missed_rows
+            missed = [r['ipport'] for r in missed_rows]
+            if missed:
+                log('警告: %d 个节点未出现在质检结果中, 原样保留: %s'
+                    % (len(missed), ', '.join(missed[:10]) + ('…' if len(missed) > 10 else '')))
+            for p in pruned:
+                log('剔除: %s (本次 %s, 低于 %.2f MB/s)' % (p['ipport'], p['speed'], speed_min))
+
+            # 只重写 latest 的 top_nodes 两个文件(分源/全量文件保留原样)
+            self._rewrite_latest_top(final_rows, settings, log)
+
+            prev_meta = load_latest_meta() or {}
+            info = {
+                'id': run_id, 'trigger': trigger, 'at': now_str(),
+                'checked': len(ipports), 'kept': len(kept),
+                'kept_untested': len(missed_rows), 'file_count': len(final_rows),
+                'pruned_count': len(pruned),
+                'pruned': [{'ipport': p['ipport'], 'speed': p['speed']} for p in pruned],
+                'source_run_id': prev_meta.get('run_id', ''),
+                'missed': missed,
+            }
+            update_latest_meta_qa(info)
+            save_qa_record({'id': run_id, 'trigger': trigger, 'started_at': self.state.get('started_at'),
+                            'finished_at': now_str(), 'status': 'success',
+                            'checked': len(ipports), 'kept': len(kept),
+                            'kept_untested': len(missed_rows), 'pruned_count': len(pruned),
+                            'pruned': [p['ipport'] for p in pruned],
+                            'latest_run_id': prev_meta.get('run_id', ''), 'error': ''})
+            log('质检完成: 检查 %d 个, 保留 %d 个(另有 %d 个未测到原样保留), 剔除 %d 个 (latest 已重写, 运行历史/历史池未动)'
+                % (len(ipports), len(kept), len(missed_rows), len(pruned)))
+            if not final_rows:
+                log('警告: Top 节点已全部低于阈值, latest 订阅内容为空, 建议尽快触发一次完整任务')
+            log('===== 质检完成 =====')
+            self._set(phase='done', running=False, finished_at=now_str(),
+                      message='质检完成: 保留 %d / 剔除 %d' % (len(final_rows), len(pruned)))
+        except _CanceledError:
+            msg = '质检已取消, latest 保持原样'
+            log(msg)
+            save_qa_record({'id': run_id, 'trigger': trigger, 'started_at': self.state.get('started_at'),
+                            'finished_at': now_str(), 'status': 'canceled',
+                            'checked': 0, 'kept': 0, 'pruned_count': 0, 'pruned': [],
+                            'latest_run_id': '', 'error': msg})
+            self._set(phase='canceled', running=False, finished_at=now_str(), message=msg)
+        except Exception as e:
+            msg = '质检失败: %s' % e
+            log(msg)
+            save_qa_record({'id': run_id, 'trigger': trigger, 'started_at': self.state.get('started_at'),
+                            'finished_at': now_str(), 'status': 'error',
+                            'checked': 0, 'kept': 0, 'pruned_count': 0, 'pruned': [],
+                            'latest_run_id': '', 'error': str(e)})
+            self._set(phase='error', running=False, finished_at=now_str(), message=msg)
+        finally:
+            if logf:
+                logf.close()
+            with self._lock:
+                self._running = False
+                self._proc = None
+
+    def _rewrite_latest_top(self, kept, settings, log):
+        """用质检后的保留节点重写 results/latest/ 的 top_nodes.txt 与 top_nodes.yaml"""
+        node_cfg = settings.get('node', {})
+        txt_path = os.path.join(LATEST_DIR, 'top_nodes.txt')
+        yaml_path = os.path.join(LATEST_DIR, 'top_nodes.yaml')
+        try:
+            os.makedirs(LATEST_DIR, exist_ok=True)
+            tmp = txt_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                for r in kept:
+                    f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'],
+                                               r['dc'] or 'CF', r['loc'] or 'XX'))
+            os.replace(tmp, txt_path)
+            used_names = set()
+            tmp = yaml_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write('proxies:\n')
+                for r in kept:
+                    self._yaml_node(f, r, self._node_name(r, settings, used_names), node_cfg)
+            os.replace(tmp, yaml_path)
+            log('已重写 latest: top_nodes.txt / top_nodes.yaml (节点速度已刷新为本次质检实测值)')
+        except Exception as e:
+            log('重写 latest 失败: %s' % e)
+            raise
 
 
 class _CanceledError(Exception):
@@ -1379,6 +1577,115 @@ def load_latest_meta():
     return data
 
 
+# ---------------------------------------------------------------- 质检记录
+_QA_LOCK = threading.RLock()
+
+
+def load_qa_runs():
+    """读取质检历史记录(最近 50 条, 按时间倒序)"""
+    with _QA_LOCK:
+        if not os.path.exists(QA_RUNS_PATH):
+            return []
+        try:
+            with open(QA_RUNS_PATH, 'r', encoding='utf-8') as f:
+                runs = json.load(f)
+            if isinstance(runs, list):
+                return [r for r in runs if isinstance(r, dict)]
+        except Exception:
+            pass
+        return []
+
+
+def save_qa_record(rec):
+    with _QA_LOCK:
+        runs = [r for r in load_qa_runs() if r.get('id') != rec.get('id')]
+        runs.append(rec)
+        runs.sort(key=lambda r: r.get('id', ''), reverse=True)
+        runs = runs[:50]
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = QA_RUNS_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(runs, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, QA_RUNS_PATH)
+        except Exception as e:
+            sys.stderr.write('保存质检记录失败: %s\n' % e)
+
+
+def read_latest_top_lines():
+    """读取 results/latest/top_nodes.txt 的 (ip:port, 注释) 列表(质检的输入)
+
+    注释为 # 后的 "速度-数据中心-位置", 用于未测到节点原样保留时还原行内容。
+    """
+    path = os.path.join(LATEST_DIR, 'top_nodes.txt')
+    if not os.path.isfile(path):
+        return []
+    out, seen = [], set()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ipport, _, note = line.partition('#')
+                ipport = ipport.strip()
+                if ipport and ':' in ipport and ipport not in seen:
+                    seen.add(ipport)
+                    out.append((ipport, note.strip()))
+    except Exception:
+        return []
+    return out
+
+
+def read_latest_top_ipports():
+    """读取 results/latest/top_nodes.txt 中的 ip:port 列表"""
+    return [ipport for ipport, _ in read_latest_top_lines()]
+
+
+def _ghost_row(ipport, note):
+    """用原行注释构造一个"未测到"节点的行记录, 使其可原样保留进重写后的文件"""
+    speed_text, dc, loc = note, '', ''
+    parts = note.rsplit('-', 2)
+    if len(parts) == 3:
+        speed_text, dc, loc = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    speed = parse_speed_mb(speed_text)
+    ip, port_s = ipport.rsplit(':', 1)
+    return {
+        'ip': ip, 'port': port_s, 'ipport': ipport,
+        'speed': speed if speed is not None else -1.0,
+        'speed_text': speed_text or '未质检',
+        'latency': '', 'latency_ms': 0,
+        'dc': dc, 'loc': loc, 'region': '', 'city': '',
+    }
+
+
+def update_latest_meta_qa(info):
+    """在 latest/meta.json 追加质检信息; top_count 同步为重写后文件中的实际节点数"""
+    meta_path = os.path.join(LATEST_DIR, 'meta.json')
+    try:
+        data = {}
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+        data['qa'] = info
+        # file_count = 实测达标 + 未测到原样保留, 即重写后文件的节点数
+        file_count = info.get('file_count')
+        if file_count is None:
+            file_count = info.get('kept', 0) + len(info.get('missed') or [])
+        data['top_count'] = file_count if file_count is not None else data.get('top_count', 0)
+        tmp = meta_path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, meta_path)
+    except Exception as e:
+        sys.stderr.write('更新 latest 质检信息失败: %s\n' % e)
+
+
 # ---------------------------------------------------------------- 定时调度器
 class CronScheduler(threading.Thread):
     def __init__(self, store: ConfigStore, runner: TaskRunner, interval=15):
@@ -1387,6 +1694,7 @@ class CronScheduler(threading.Thread):
         self.runner = runner
         self.interval = interval
         self._last_fire = None
+        self._last_fire_qa = None
         self._expr = None
         self._expr_str = None
         self._next_runs = []
@@ -1394,6 +1702,16 @@ class CronScheduler(threading.Thread):
 
     def current_expr(self):
         cron = self.store.get().get('cron', {})
+        if not cron.get('enabled'):
+            return None
+        try:
+            return CronExpr(cron.get('expr', ''))
+        except ValueError:
+            return None
+
+    def qa_current_expr(self):
+        """质检独立定时的 cron 表达式; 未启用/无效时返回 None"""
+        cron = self.store.get().get('qa_cron', {})
         if not cron.get('enabled'):
             return None
         try:
@@ -1433,6 +1751,21 @@ class CronScheduler(threading.Thread):
                             self.runner.start(trigger='cron')
                 else:
                     self._last_fire = None
+                # 质检独立定时: 仅复测 latest Top 节点, 与主任务共用执行锁(运行中则跳过)
+                qa_expr = self.qa_current_expr()
+                if qa_expr is not None:
+                    now = datetime.now()
+                    minute_key = now.strftime('%Y-%m-%d %H:%M')
+                    if qa_expr.matches(now) and self._last_fire_qa != minute_key:
+                        self._last_fire_qa = minute_key
+                        if self.runner.is_running():
+                            self.runner.log.write('[%s] [qa-cron] 定时质检触发时已有任务在运行, 本次跳过'
+                                                  % now_str('%H:%M:%S'))
+                        else:
+                            self.runner.log.write('[%s] [qa-cron] 定时质检触发' % now_str('%H:%M:%S'))
+                            self.runner.start_qa(trigger='cron')
+                else:
+                    self._last_fire_qa = None
             except Exception as e:
                 sys.stderr.write('cron 调度异常: %s\n' % e)
             time.sleep(self.interval)
@@ -1450,6 +1783,29 @@ STORE = ConfigStore()
 HISTORY = HistoryPool()
 RUNNER = TaskRunner(STORE)
 SCHEDULER = CronScheduler(STORE, RUNNER)
+
+
+def _cron_block(cron_cfg):
+    """把 {enabled, expr} 配置渲染成前端可用的 cron 状态块(含下次运行时间)"""
+    obj, err = None, ''
+    try:
+        obj = CronExpr(cron_cfg.get('expr', ''))
+    except ValueError as e:
+        err = str(e)
+    next_runs = []
+    if cron_cfg.get('enabled') and obj is not None:
+        try:
+            next_runs = [d.strftime('%Y-%m-%d %H:%M') for d in obj.next_runs(count=3)]
+        except Exception:
+            next_runs = []
+    return {
+        'enabled': bool(cron_cfg.get('enabled')),
+        'expr': cron_cfg.get('expr', ''),
+        'valid': obj is not None,
+        'error': err,
+        'description': obj.describe() if obj else '',
+        'next_runs': next_runs,
+    }
 
 
 def api_state():
@@ -1471,8 +1827,16 @@ def api_state():
                         'finished_at': r.get('finished_at'),
                         'top_count': r.get('top_count', 0), 'total_nodes': r.get('total_nodes', 0)}
             break
+    qa_records = load_qa_runs()
+    qa_last = None
+    if qa_records:
+        q = qa_records[0]
+        qa_last = {'id': q.get('id'), 'status': q.get('status'), 'at': q.get('finished_at'),
+                   'trigger': q.get('trigger'), 'checked': q.get('checked', 0),
+                   'kept': q.get('kept', 0), 'pruned_count': q.get('pruned_count', 0)}
     return {
         'running': snap['running'],
+        'kind': snap.get('kind', ''),
         'phase': snap['phase'],
         'message': snap['message'],
         'current_source': snap['current_source'],
@@ -1491,6 +1855,8 @@ def api_state():
             'description': cron_obj.describe() if cron_obj else '',
             'next_runs': [d.strftime('%Y-%m-%d %H:%M') for d in next_runs],
         },
+        'qa_cron': _cron_block(cfg.get('qa_cron', {})),
+        'qa_last': qa_last,
         'sources_enabled': len(STORE.enabled_sources()),
         'sources_total': len(cfg.get('sources', [])),
         'last_run': last_run,
@@ -1612,6 +1978,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'ok': True, 'data': data})
                 return
 
+            if path == '/api/qa':
+                self._json({'ok': True, 'data': {
+                    'records': load_qa_runs()[:20],
+                    'cron': _cron_block(STORE.get().get('qa_cron', {})),
+                }})
+                return
+
             m = re.fullmatch(r'/api/runs/([\w.:-]+)', path)
             if m:
                 rec = load_run_record(m.group(1))
@@ -1699,6 +2072,21 @@ class Handler(BaseHTTPRequestHandler):
                 ok, msg = RUNNER.start(trigger='manual')
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
 
+            if path == '/api/qa':
+                ok, msg = RUNNER.start_qa(trigger='manual')
+                return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
+
+            if path == '/api/qa_cron':
+                expr = (body.get('expr') or '').strip()
+                enabled = bool(body.get('enabled'))
+                if enabled:
+                    try:
+                        CronExpr(expr)
+                    except ValueError as e:
+                        return self._json({'ok': False, 'error': 'cron 表达式无效: %s' % e}, 400)
+                STORE.update({'qa_cron': {'enabled': enabled, 'expr': expr}})
+                return self._json({'ok': True, 'data': _cron_block(STORE.get().get('qa_cron', {}))})
+
             if path == '/api/cancel':
                 ok, msg = RUNNER.cancel()
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
@@ -1746,6 +2134,9 @@ def main():
     print('[init] 历史节点池: %d 个节点 (%s)' % (
         len(HISTORY), '复测已开启' if STORE.get()['settings'].get('history_test_enabled', True)
         else '复测已关闭'))
+    qa_cron = STORE.get().get('qa_cron', {})
+    print('[init] Top 节点质检: %s' % (
+        '定时已启用 (%s)' % qa_cron.get('expr', '') if qa_cron.get('enabled') else '手动触发(可配置独立定时)'))
 
     # 启动时预生成 cfdata 配置文件, 避免首次正式任务被中断
     binary = RUNNER.locate_binary()

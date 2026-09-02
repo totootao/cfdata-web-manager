@@ -262,6 +262,36 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <div style="margin-top:14px"><button class="btn-primary" onclick="saveCron()">保存定时设置</button></div>
       <div class="nextrun" id="cronNext"></div>
     </div>
+    <div class="card">
+      <h2>Top 节点质检定时</h2>
+      <div class="desc">到点后仅复测 <b>results/latest/</b> 的 Top 节点（-nsbfile 本地复测，秒级完成），低于速度阈值（复用参数设置的最低速度）的节点从 top_nodes.txt/.yaml 剔除；适合在两次完整任务之间高频保鲜订阅列表</div>
+      <div class="row" style="margin-bottom:16px">
+        <label class="switch"><input type="checkbox" id="qaCronEnabled"><span class="slider"></span></label>
+        <span style="font-weight:600" id="qaCronEnabledText">未启用</span>
+      </div>
+      <div class="grid g2">
+        <div class="field">
+          <label>Cron 表达式</label>
+          <input type="text" id="qaCronExpr" placeholder="*/30 * * * *" spellcheck="false">
+          <div class="hint" id="qaCronDesc"></div>
+        </div>
+        <div class="field">
+          <label>常用预设</label>
+          <select id="qaCronPreset" onchange="applyQaPreset(this.value)">
+            <option value="">— 选择预设 —</option>
+            <option value="*/15 * * * *">每 15 分钟</option>
+            <option value="*/30 * * * *">每 30 分钟</option>
+            <option value="0 * * * *">每小时整点</option>
+            <option value="0 */2 * * *">每 2 小时</option>
+            <option value="0 8,20 * * *">每天 08/20 点</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:14px"><button class="btn-primary" onclick="saveQaCron()">保存质检定时</button></div>
+      <div class="nextrun" id="qaCronNext"></div>
+      <div class="section-title" style="margin-top:18px">最近质检记录</div>
+      <div id="qaRecords"><div class="empty">暂无质检记录</div></div>
+    </div>
   </div>
 
   <!-- 参数设置 -->
@@ -341,6 +371,10 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     <div class="card">
       <h2>最新结果 <span class="tag ok">latest</span></h2>
       <div class="desc">最新一次成功任务的结果固定保存于 <b>results/latest/</b>，路径永不变化，可直接用于订阅</div>
+      <div class="row" style="margin:14px 0 10px">
+        <button class="btn-primary" id="btnQa" onclick="triggerQa()">🔍 质检 Top 节点</button>
+        <span class="hint" style="align-self:center">仅复测 latest 的 Top 节点，低于速度阈值的从 top_nodes.txt/.yaml 剔除（不产生新运行记录，不动历史池）</span>
+      </div>
       <div id="latestBox"><div class="empty">暂无最新结果，请先运行任务</div></div>
     </div>
     <div class="card">
@@ -383,7 +417,7 @@ function switchTab(id, btn){
   curTab = id;
   if(id==='tab-res') loadRuns();
   if(id==='tab-src'){ loadSources(); loadHistory(); }
-  if(id==='tab-cron') loadCronState();
+  if(id==='tab-cron'){ loadCronState(); loadQaState(); }
 }
 
 /* ---------- 状态轮询 ---------- */
@@ -420,16 +454,20 @@ async function pollLog(){
 }
 function renderState(d){
   const badge = $('statusBadge');
+  const qaBtn = $('btnQa');
   if(d.running){
-    badge.className='badge run'; badge.innerHTML='<span class="dot"></span>运行中';
+    badge.className='badge run';
+    badge.innerHTML='<span class="dot"></span>'+(d.kind==='qa'?'质检中':'运行中');
     $('btnRun').disabled = true; $('btnCancel').style.display='';
+    if(qaBtn) qaBtn.disabled = true;
   }else{
     const ok = d.phase!=='error' && d.phase!=='canceled';
     badge.className='badge '+(ok?'idle':'err');
     badge.innerHTML='<span class="dot"></span>'+(d.phase==='error'?'异常':d.phase==='canceled'?'已取消':'空闲');
     $('btnRun').disabled = false; $('btnCancel').style.display='none';
+    if(qaBtn) qaBtn.disabled = false;
   }
-  const phaseMap={idle:'空闲',preparing:'准备中',running:'运行中',finishing:'汇总排序',done:'已完成',error:'失败',canceled:'已取消'};
+  const phaseMap={idle:'空闲',preparing:'准备中',running:'运行中',finishing:'汇总排序',qa:'质检中',done:'已完成',error:'失败',canceled:'已取消'};
   $('stPhase').textContent = phaseMap[d.phase]||d.phase;
   $('stSource').textContent = d.current_source || '—';
   $('stProgress').textContent = d.progress.done+' / '+d.progress.total;
@@ -602,6 +640,71 @@ async function saveCron(){
     renderCronInfo(j.data);
     toast('定时任务设置已保存');
   }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- Top 节点质检 ---------- */
+async function triggerQa(){
+  try{
+    const j = await api('/api/qa',{method:'POST'});
+    // 409 拒绝时响应体为 {ok:false, message:...}, 正常展示拒绝原因
+    toast(j.message||'质检已启动', j.ok);
+    if(j.ok) pollState();
+  }catch(e){ toast(e.message,false) }
+}
+function loadQaState(){
+  if(!stateCache) return;
+  const c = stateCache.qa_cron || {};
+  $('qaCronEnabled').checked = !!c.enabled;
+  $('qaCronExpr').value = c.expr||'';
+  renderQaCronInfo(c);
+  loadQaRecords();
+}
+function renderQaCronInfo(c){
+  $('qaCronEnabledText').textContent = c.enabled?'已启用':'未启用';
+  $('qaCronDesc').textContent = c.valid ? ('含义: '+c.description) : (c.error?('表达式无效: '+c.error):'');
+  $('qaCronNext').innerHTML = (c.enabled && c.next_runs && c.next_runs.length)
+    ? '⏭️ 接下来 3 次质检时间：<br>' + c.next_runs.map(t=>'<b>'+t+'</b>').join('<br>')
+    : (c.enabled?'启用后显示下次质检时间':'');
+}
+function applyQaPreset(v){ if(v){ $('qaCronExpr').value=v; } }
+async function saveQaCron(){
+  try{
+    const j = await api('/api/qa_cron',{method:'POST',
+      body:JSON.stringify({enabled:$('qaCronEnabled').checked, expr:$('qaCronExpr').value.trim()})});
+    renderQaCronInfo(j.data);
+    toast('质检定时设置已保存');
+  }catch(e){ toast(e.message,false) }
+}
+async function loadQaRecords(){
+  try{
+    const j = await api('/api/qa');
+    const box = $('qaRecords');
+    const recs = j.data.records||[];
+    if(!recs.length){ box.innerHTML='<div class="empty">暂无质检记录</div>'; return }
+    box.innerHTML = recs.map(r=>{
+      const st={success:'ok',error:'err',canceled:'off'}[r.status]||'off';
+      const stTxt={success:'成功',error:'失败',canceled:'取消'}[r.status]||r.status;
+      const tr = r.trigger==='cron'?'定时':'手动';
+      const pruned = (r.pruned||[]).map(p=>'<code>'+esc(p)+'</code>').join(' ');
+      return `<div class="runrow">
+        <div class="row">
+          <b>${esc(r.id||'')}</b>
+          <span class="tag ${st}">${stTxt}</span>
+          <span class="tag off">${tr}</span>
+          <div class="spacer"></div>
+          <span style="font-size:12px;color:var(--muted)">${esc(r.finished_at||'')}</span>
+        </div>
+        <div class="meta" style="margin-top:6px">
+          <span>检查: <b style="color:var(--text)">${r.checked??'-'}</b></span>
+          <span>保留: <b style="color:var(--ok)">${r.kept??'-'}</b></span>
+          <span>未测保留: <b style="color:var(--cyan)">${r.kept_untested??0}</b></span>
+          <span>剔除: <b style="color:var(--warn)">${r.pruned_count??0}</b></span>
+        </div>
+        ${r.pruned_count>0?`<div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">剔除节点: ${pruned}</div>`:''}
+        ${r.error?`<div class="meta" style="margin-top:4px;font-size:11px;color:var(--err)">${esc(r.error)}</div>`:''}
+      </div>`;
+    }).join('');
+  }catch(e){ /* 静默 */ }
 }
 
 /* ---------- 参数设置 ---------- */

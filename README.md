@@ -18,6 +18,7 @@
   - 附带 `all_sorted.txt` 全量排序结果
 - **分源优选**：测速完成后每个源单独提取速度最快的前 N 个节点（默认 5，可配置），输出 `top_by_source.txt` 与对应的 Clash YAML `top_by_source.yaml`（节点名带 `[源名]` 前缀），运行详情页同步展示分源排名表格
 - **latest 固定目录**：每次任务成功后自动把最新结果同步到 `results/latest/`，路径永不变化，可直接作为订阅链接
+- **Top 节点质检**：针对 latest 的 Top 节点一键复测（`-nsbfile` 本地输入，秒级完成），低于速度阈值的节点自动从订阅文件剔除；支持独立 cron 高频保鲜，只重写 latest 两个 Top 文件，不触碰运行历史与历史节点池
 - **历史记录**：每次运行保存各源测试情况、Top 节点表格、分源最快节点表格、YAML 预览，支持在线下载
 
 ## 快速开始
@@ -90,6 +91,26 @@ results/latest/
 - 池为空时自动跳过历史源，不影响任务执行；关闭复测且无已启用源时任务拒绝启动
 - 界面「参数设置」页提供开关与三项参数配置，「历史节点池」卡片展示池内节点（最近速度/历史最佳/命中次数/失败次数/来源）与来源贡献统计，支持一键清空
 
+## Top 节点质检
+
+完整任务测的是"候选池"，订阅真正用的是 `results/latest/` 的 Top 节点。质检子任务只针对这批节点做高频复测保鲜，不产生新的运行记录：
+
+- **触发方式**：「运行结果」页点「🔍 质检 Top 节点」手动触发，或在「Top 节点质检定时」卡片配置独立 cron（与主任务定时互不影响，如 `*/30 * * * *` 每 30 分钟一次）
+- **剔除规则**：复测速度低于「最低速度」（复用参数设置 `speed_min`，即 `-nsbspeedmin`）的节点从 `top_nodes.txt` / `top_nodes.yaml` 剔除；未出现在本次结果中的节点**原样保留**（未测不判死刑）
+- **速度刷新**：保留节点的注释速度/节点名同步刷新为本次实测值，达标节点按速度降序重排，未测节点追加在末尾
+- **影响范围**：只重写 latest 的两个 Top 文件并在 `meta.json` 追加 `qa` 信息；`all_sorted.txt`、分源文件、`runs.json` 运行历史、历史节点池全部不动，主任务的合并/排序/提取逻辑不受影响
+- **互斥保护**：与主任务共用执行锁，一方运行中另一方触发被拒绝；质检失败或取消时 latest 保持原样
+- **记录留痕**：每次质检（成功/失败/取消）记入 `data/qa_runs.json`（保留最近 50 条），界面展示检查/保留/未测保留/剔除统计与被剔除节点明细；质检工作目录 `results/qa_*/qa.log` 保存完整日志
+- **全灭提醒**：Top 节点全部低于阈值时文件清空并记录警告，提示尽快触发一次完整任务
+
+等价命令（把 latest Top 节点导出为 `ip:port` 文本后执行）：
+
+```bash
+./cfdata-linux-amd64 -cli -mode nsb \
+  -nsbfile qa_input.txt \
+  ... # 其余参数与完整任务相同, speedmin 即剔除阈值
+```
+
 ## 目录结构
 
 ```
@@ -99,8 +120,9 @@ cfdata_web/
 ├── web/
 │   └── index.html         # Web 界面（单文件，无构建依赖）
 ├── data/                  # 数据目录（Docker 环境 = 挂载点 /app/data，需挂载持久化）
-│   ├── config.json        # 源/定时/参数配置（本地运行时直接生成在应用目录）
+│   ├── config.json        # 源/定时/参数/质检定时配置（本地运行时直接生成在应用目录）
 │   ├── history_nodes.json # 历史节点池（达标节点 + 来源归属 + 淘汰状态）
+│   ├── qa_runs.json       # 质检记录（最近 50 条：检查/保留/剔除统计）
 │   ├── cfdata-config.json # cfdata CLI 配置（本地运行时直接生成在应用目录）
 │   └── locations.json     # 数据中心位置缓存（本地运行时直接生成在应用目录）
 └── results/               # 运行时自动生成
@@ -111,15 +133,19 @@ cfdata_web/
     │   ├── all_sorted.txt
     │   ├── top_by_source.txt
     │   ├── top_by_source.yaml
-    │   └── meta.json      # 元信息（来源运行 ID / 完成时间 / 节点数）
-    └── 20260901_080000/   # 每次运行一个目录
-        ├── run.log        # 运行日志
-        ├── source_01.csv  # 各源原始结果
-        ├── top_nodes.txt  # Top 节点（TXT 格式）
-        ├── top_nodes.yaml # Top 节点（Clash YAML 格式）
-        ├── all_sorted.txt # 全量排序结果
-        ├── top_by_source.txt # 分源最快节点（每源前 N 个）
-        └── top_by_source.yaml # 分源最快节点（Clash YAML 格式）
+    │   └── meta.json      # 元信息（来源运行 ID / 完成时间 / 节点数 / 质检信息 qa）
+    ├── 20260901_080000/   # 每次运行一个目录
+    │   ├── run.log        # 运行日志
+    │   ├── source_01.csv  # 各源原始结果
+    │   ├── top_nodes.txt  # Top 节点（TXT 格式）
+    │   ├── top_nodes.yaml # Top 节点（Clash YAML 格式）
+    │   ├── all_sorted.txt # 全量排序结果
+    │   ├── top_by_source.txt # 分源最快节点（每源前 N 个）
+    │   └── top_by_source.yaml # 分源最快节点（Clash YAML 格式）
+    └── qa_20260901_0900/  # 每次质检一个工作目录（不进入运行历史）
+        ├── qa.log         # 质检日志（剔除/保留明细）
+        ├── qa_input.txt   # 质检输入（latest Top 节点导出）
+        └── qa.csv         # 质检实测结果
 ```
 
 ## 输出格式示例
