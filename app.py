@@ -48,6 +48,10 @@ else:
 CONFIG_PATH = os.path.join(DATA_DIR, 'config.json')
 CFDATA_CONFIG_PATH = os.path.join(DATA_DIR, 'cfdata-config.json')
 LOCATIONS_CACHE_PATH = os.path.join(DATA_DIR, 'locations.json')
+# 历史节点池(跨轮复测的达标节点集合), 同样存放于数据目录以持久化
+HISTORY_POOL_PATH = os.path.join(DATA_DIR, 'history_nodes.json')
+HISTORY_SOURCE_ID = '__history__'
+HISTORY_SOURCE_NAME = '历史节点'
 # 固定的"最新结果"目录: 每次任务成功后同步覆盖, 路径不变便于外部订阅
 LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
 LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt',
@@ -79,6 +83,11 @@ DEFAULT_CONFIG = {
         'per_source_top_n': 5,      # 每个源单独提取速度最快的前 N 个节点(输出 top_by_source.txt)
         'source_retries': 3,        # 源获取失败自动重试次数(0 = 不重试)
         'source_retry_delay': 5,    # 重试间隔秒数
+        # ---- 历史节点复测 ----
+        'history_test_enabled': True,   # 把池内历史达标节点作为第一个"源"参与每轮测试
+        'history_pool_capacity': 250,   # 池容量上限, 超出挤出最近速度最慢的
+        'history_window_runs': 5,       # 滚动窗口: 只保留最近 N 次运行出现过的节点
+        'history_evict_fails': 3,       # 连续 K 次复测不达标即移出池
         'speedtest_threads': 5,     # -nsbspeedtest 测速线程数
         'speed_min': 5.0,           # -nsbspeedmin 最低速度 MB/s
         'speed_limit': 9999,        # -nsbspeedlimit 测速结果上限
@@ -284,6 +293,213 @@ class ConfigStore:
     def enabled_sources(self):
         with self._lock:
             return [dict(s) for s in self._cfg['sources'] if s.get('enabled')]
+
+
+# ---------------------------------------------------------------- 历史节点池
+class HistoryPool:
+    """历史达标节点池: 滚动窗口并集 + 连续失败淘汰 + 容量上限
+
+    池文件结构与数据目录内其他状态文件一致, Docker 挂载 /app/data 即可跨容器保留。
+    每个节点记录原始来源(首次发现它的 API 源), 复测只刷新速度/计数, 不改变归属。
+    """
+
+    def __init__(self, path=HISTORY_POOL_PATH):
+        self._path = path
+        self._lock = threading.RLock()
+        self._nodes = {}        # ipport -> entry
+        self._recent_runs = []  # 最近 N 次运行 ID(滚动窗口)
+        self._load()
+
+    # ---- 持久化 ----
+    def _load(self):
+        if not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            nodes = data.get('nodes') or {}
+            if isinstance(nodes, dict):
+                self._nodes = {k: v for k, v in nodes.items() if isinstance(v, dict) and k}
+            runs = data.get('recent_runs') or []
+            if isinstance(runs, list):
+                self._recent_runs = [str(r) for r in runs]
+        except Exception as e:
+            sys.stderr.write('读取历史节点池失败(%s), 从空池开始\n' % e)
+
+    def _save(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = self._path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'version': 1, 'updated_at': now_str(),
+                           'recent_runs': self._recent_runs, 'nodes': self._nodes},
+                          f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._path)
+        except Exception as e:
+            sys.stderr.write('保存历史节点池失败: %s\n' % e)
+
+    # ---- 查询 ----
+    def __len__(self):
+        with self._lock:
+            return len(self._nodes)
+
+    def list_nodes(self):
+        """按最近速度降序返回节点列表(界面展示用)"""
+        with self._lock:
+            nodes = sorted(self._nodes.values(),
+                           key=lambda e: (-float(e.get('last_speed') or 0), e.get('ipport', '')))
+            out = []
+            for e in nodes:
+                item = dict(e)
+                try:
+                    item['best_speed_text'] = '%.2fMB/s' % float(e.get('best_speed') or 0)
+                except (TypeError, ValueError):
+                    item['best_speed_text'] = '-'
+                out.append(item)
+            return out
+
+    def stats(self):
+        with self._lock:
+            by_origin = {}
+            for e in self._nodes.values():
+                name = e.get('origin_source_name') or '未知'
+                by_origin[name] = by_origin.get(name, 0) + 1
+            return {'total': len(self._nodes),
+                    'by_origin': by_origin,
+                    'recent_runs': list(self._recent_runs)}
+
+    def clear(self):
+        with self._lock:
+            self._nodes = {}
+            self._recent_runs = []
+            self._save()
+
+    # ---- 任务侧 ----
+    def build_test_source(self, settings):
+        """返回历史伪源描述; 未开启或池为空时返回 None"""
+        if not settings.get('history_test_enabled', True):
+            return None
+        with self._lock:
+            count = len(self._nodes)
+        if count <= 0:
+            return None
+        return {'id': HISTORY_SOURCE_ID, 'name': HISTORY_SOURCE_NAME,
+                'url': '(节点池 %d 个节点 · 本地文件)' % count,
+                'enabled': True, 'is_history': True, 'pool_size': count}
+
+    def export_input_file(self, path):
+        """把池内全部节点导出为 ip:port 文本(每行一个), 供 cfdata -nsbfile 复测"""
+        with self._lock:
+            keys = sorted(self._nodes.keys())
+        with open(path, 'w', encoding='utf-8') as f:
+            for k in keys:
+                f.write(k + '\n')
+        return len(keys)
+
+    def update_from_run(self, run_id, api_results, history_rows, history_ok, settings):
+        """任务成功后更新池; 返回变化统计
+
+        api_results: [(src_dict, rows)] 各 API 源及其本轮结果行
+        history_rows: 历史伪源的复测结果行(未执行时为 None)
+        history_ok: 历史伪源本轮是否成功执行(失败则不计失败次数)
+        """
+        try:
+            speed_min = float(settings.get('speed_min') or 0)
+        except (TypeError, ValueError):
+            speed_min = 0.0
+        window = max(1, int(settings.get('history_window_runs') or 5))
+        capacity = max(1, int(settings.get('history_pool_capacity') or 250))
+        evict_fails = max(1, int(settings.get('history_evict_fails') or 3))
+
+        with self._lock:
+            nodes = {k: dict(v) for k, v in self._nodes.items()}
+            recent = (self._recent_runs + [run_id])[-window:]
+            refreshed = set()
+            added = 0
+
+            def _refresh(entry, row):
+                entry['last_seen'] = run_id
+                entry['fail_streak'] = 0
+                entry['last_speed'] = row['speed']
+                entry['last_speed_text'] = row['speed_text']
+                entry['last_latency'] = row['latency']
+                try:
+                    entry['best_speed'] = max(float(entry.get('best_speed') or 0), row['speed'])
+                except (TypeError, ValueError):
+                    entry['best_speed'] = row['speed']
+
+            # 1) API 源达标节点: 入池/刷新(归属在首次入池时固化)
+            for src, rows in api_results or []:
+                for r in rows:
+                    if r['speed'] is None or r['speed'] < speed_min:
+                        continue
+                    key = r['ipport']
+                    e = nodes.get(key)
+                    if e is None:
+                        nodes[key] = {
+                            'ipport': key, 'ip': r['ip'], 'port': r['port'],
+                            'origin_source_id': src.get('id', ''),
+                            'origin_source_name': src.get('name', '未知源'),
+                            'origins': [src.get('name', '未知源')],
+                            'origin_run_id': run_id,
+                            'first_seen': run_id, 'last_seen': run_id,
+                            'last_speed': r['speed'], 'best_speed': r['speed'],
+                            'last_speed_text': r['speed_text'], 'last_latency': r['latency'],
+                            'hits': 1, 'fail_streak': 0,
+                        }
+                        added += 1
+                    else:
+                        if src.get('name') and src['name'] not in (e.get('origins') or []):
+                            e.setdefault('origins', []).append(src['name'])
+                        if key not in refreshed:
+                            e['hits'] = int(e.get('hits') or 0) + 1
+                        _refresh(e, r)
+                    refreshed.add(key)
+
+            # 2) 历史复测达标: 刷新已有池节点(不改归属; 本轮已被 API 源刷新过的不重复计)
+            history_qualified = set()
+            for r in (history_rows or []):
+                if r['speed'] is None or r['speed'] < speed_min:
+                    continue
+                key = r['ipport']
+                history_qualified.add(key)
+                e = nodes.get(key)
+                if e is not None and key not in refreshed:
+                    e['hits'] = int(e.get('hits') or 0) + 1
+                    _refresh(e, r)
+                    refreshed.add(key)
+
+            # 3) 历史源成功执行时, 未复测达标的池节点计一次失败; 连续 K 次移出
+            evicted = []
+            if history_ok:
+                for key, e in list(nodes.items()):
+                    if key in refreshed or key in history_qualified:
+                        continue
+                    e['fail_streak'] = int(e.get('fail_streak') or 0) + 1
+                    if e['fail_streak'] >= evict_fails:
+                        nodes.pop(key, None)
+                        evicted.append(key)
+
+            # 4) 滚动窗口: last_seen 不在最近 N 次运行内的节点移出
+            window_set = set(recent)
+            expired = [k for k, e in nodes.items() if e.get('last_seen') not in window_set]
+            for k in expired:
+                nodes.pop(k, None)
+
+            # 5) 容量上限: 挤出最近速度最慢的
+            dropped = []
+            if len(nodes) > capacity:
+                ordered = sorted(nodes.items(),
+                                 key=lambda kv: (-float(kv[1].get('last_speed') or 0), kv[0]))
+                for k, _ in ordered[capacity:]:
+                    nodes.pop(k, None)
+                    dropped.append(k)
+
+            self._nodes = nodes
+            self._recent_runs = recent
+            self._save()
+            return {'total': len(nodes), 'added': added, 'refreshed': len(refreshed),
+                    'evicted': len(evicted), 'expired': len(expired), 'dropped': len(dropped)}
 
 
 # ---------------------------------------------------------------- Cron 解析
@@ -501,6 +717,13 @@ class TaskRunner:
 
     # ---- 触发 ----
     def start(self, trigger='manual'):
+        # 前置校验: 无已启用源且历史池不可用(关闭/为空)时直接拒绝, 不产生秒失败的运行记录
+        cfg = self.store.get()
+        if not self.store.enabled_sources() and \
+                not HISTORY.build_test_source(cfg.get('settings') or {}):
+            reason = ('历史节点复测已关闭' if not (cfg.get('settings') or {})
+                      .get('history_test_enabled', True) else '历史节点池为空')
+            return False, '没有已启用的 API 源, 请先在「API 源管理」中添加 (%s)' % reason
         with self._lock:
             if self._running:
                 return False, '任务正在运行中, 请等待完成后再触发'
@@ -577,7 +800,9 @@ class TaskRunner:
             cfg = self.store.get()
             settings = cfg['settings']
             sources = self.store.enabled_sources()
-            if not sources:
+            # 历史节点伪源: 池非空且开关开启时, 作为第一个"源"参与本轮测试
+            history_src = HISTORY.build_test_source(settings)
+            if not sources and not history_src:
                 raise RuntimeError('没有已启用的 API 源, 请先在「API 源管理」中添加')
             binary = self.locate_binary()
             if not binary:
@@ -598,29 +823,45 @@ class TaskRunner:
             log('===== 任务开始 (触发方式: %s, 运行 ID: %s) =====' % (
                 '手动' if trigger == 'manual' else '定时', run_id))
             log('二进制: %s' % binary)
-            log('已启用 API 源: %d 个 -> %s' % (len(sources), '、'.join(s['name'] for s in sources)))
+            if sources:
+                log('已启用 API 源: %d 个 -> %s' % (
+                    len(sources), '、'.join(s['name'] for s in sources)))
+            else:
+                log('已启用 API 源: 0 个 (仅测试历史节点池)')
+            if history_src:
+                log('历史节点复测: 已启用, 池内 %d 个节点将作为第一个"源"参与本轮测试' % history_src['pool_size'])
+            else:
+                log('历史节点复测: 跳过 (%s)' % (
+                    '已关闭' if not settings.get('history_test_enabled', True) else '节点池为空'))
 
-            self._set(phase='running', progress_total=len(sources), progress_done=0)
+            test_list = ([history_src] if history_src else []) + sources
+            self._set(phase='running', progress_total=len(test_list), progress_done=0)
 
             all_rows = {}
             source_reports = []
             source_rows = []   # 每个源各自的原始行(保留源归属, 用于分源 Top)
-            for idx, src in enumerate(sources):
+            api_results = []   # [(src, rows)] API 源结果, 用于历史池更新
+            history_rows, history_ok = None, False
+            for idx, src in enumerate(test_list):
                 if self._cancel:
                     raise _CanceledError()
                 # 显示"第 idx+1 个源进行中", 完成后自然递增
                 self._set(current_source=src['name'], progress_done=idx + 1)
                 self._reset_sub_progress()
-                label = '(%d/%d) %s' % (idx + 1, len(sources), src['name'])
+                label = '(%d/%d) %s' % (idx + 1, len(test_list), src['name'])
                 rows, report = self._run_one_source(binary, src, idx, run_dir, settings, log, label)
                 source_reports.append(report)
                 source_rows.append(rows)
+                if src.get('is_history'):
+                    history_rows, history_ok = rows, bool(report.get('ok'))
+                else:
+                    api_results.append((src, rows))
                 for r in rows:
                     key = r['ipport']
                     if key not in all_rows or r['speed'] > all_rows[key]['speed']:
                         all_rows[key] = r
 
-            self._set(progress_done=len(sources), phase='finishing', current_source='汇总排序')
+            self._set(progress_done=len(test_list), phase='finishing', current_source='汇总排序')
             merged = sorted(all_rows.values(),
                             key=lambda r: (-r['speed'], r['latency_ms'], r['ipport']))
             log('全部源测试完成: 共 %d 个有效节点 (已按速度降序排列)' % len(merged))
@@ -631,10 +872,10 @@ class TaskRunner:
                 log('Top%-3d %s  速度=%s  延迟=%s  数据中心=%s' % (
                     i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
 
-            # ---- 分源 Top N: 每个源单独提取速度最快的前 N 个 ----
+            # ---- 分源 Top N: 每个源(含历史伪源)单独提取速度最快的前 N 个 ----
             per_source_n = max(1, int(settings.get('per_source_top_n') or 5))
             per_source_top = []
-            for idx, src in enumerate(sources):
+            for idx, src in enumerate(test_list):
                 rows = sorted((r for r in source_rows[idx] if r['speed'] >= 0),
                               key=lambda r: (-r['speed'], r['latency_ms'], r['ipport']))
                 src_top = rows[:per_source_n]
@@ -674,6 +915,17 @@ class TaskRunner:
             }
             save_run_record(record)
             self._sync_latest(run_dir, record, log)
+            # ---- 历史节点池更新(仅任务成功时; 取消/失败不动池) ----
+            if api_results or history_rows is not None:
+                try:
+                    h = HISTORY.update_from_run(run_id, api_results, history_rows,
+                                                history_ok, settings)
+                    log('历史节点池已更新: 共 %d 个节点 (本轮新增 %d / 刷新 %d / 淘汰 %d / '
+                        '窗口过期 %d / 容量挤出 %d)' % (
+                            h['total'], h['added'], h['refreshed'],
+                            h['evicted'], h['expired'], h['dropped']))
+                except Exception as e:
+                    log('历史节点池更新失败: %s' % e)
             log('已保存 %d 个节点到两种格式: %s / %s' % (
                 len(top), os.path.basename(txt_path), os.path.basename(yaml_path)))
             log('已生成分源优选结果: %s / %s (每源速度最快 %d 个)' % (
@@ -764,7 +1016,10 @@ class TaskRunner:
         }
 
     def _exec_source_once(self, binary, src, idx, run_dir, settings, log, label):
-        """执行一次 cfdata 测试, 返回 (rows, exit_code, error)"""
+        """执行一次 cfdata 测试, 返回 (rows, exit_code, error)
+
+        普通源走 -nsbsourceurl 网络拉取; 历史伪源把池内节点导出为本地文件走 -nsbfile。
+        """
         out_name = 'source_%02d.csv' % (idx + 1)
         out_path = os.path.join(run_dir, out_name)
         if os.path.exists(out_path):
@@ -773,7 +1028,6 @@ class TaskRunner:
             binary,
             '-cli=true',
             '-mode=nsb',
-            '-nsbsourceurl=' + src['url'],
             '-nsbthreads=%d' % int(settings.get('threads') or 100),
             '-nsbspeedtest=%d' % int(settings.get('speedtest_threads') or 5),
             '-nsbspeedmin=%s' % settings.get('speed_min', 5),
@@ -789,7 +1043,19 @@ class TaskRunner:
             '-nocolor=true',
             '-config=%s' % CFDATA_CONFIG_PATH,
         ]
-        log('%s 开始测试: %s' % (label, src['url']))
+        if src.get('is_history'):
+            # 历史伪源: 池内节点导出为本地 ip:port 文件, 复用同一套测速参数
+            input_name = 'history_input.txt'
+            input_path = os.path.join(run_dir, input_name)
+            try:
+                count = HISTORY.export_input_file(input_path)
+            except Exception as e:
+                return [], 1, '导出历史节点输入文件失败: %s' % e
+            cmd.insert(3, '-nsbfile=%s' % input_name)
+            log('%s 开始测试: 历史节点池 %d 个节点 (本地文件 %s)' % (label, count, input_name))
+        else:
+            cmd.insert(3, '-nsbsourceurl=' + src['url'])
+            log('%s 开始测试: %s' % (label, src['url']))
         proc = None
         # 复用已缓存的 locations.json, 避免每次运行都重新下载数据中心位置信息
         cached_locations = LOCATIONS_CACHE_PATH
@@ -1181,6 +1447,7 @@ except Exception as e:
     sys.stderr.write('数据目录创建失败(%s): %s\n' % (DATA_DIR, e))
 MIGRATED_FILES = migrate_legacy_state()
 STORE = ConfigStore()
+HISTORY = HistoryPool()
 RUNNER = TaskRunner(STORE)
 SCHEDULER = CronScheduler(STORE, RUNNER)
 
@@ -1297,6 +1564,14 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == '/api/sources':
                 self._json({'ok': True, 'data': STORE.get().get('sources', [])})
+                return
+
+            if path == '/api/history':
+                self._json({'ok': True, 'data': {
+                    'nodes': HISTORY.list_nodes(),
+                    'stats': HISTORY.stats(),
+                    'enabled': bool(STORE.get().get('settings', {}).get('history_test_enabled', True)),
+                }})
                 return
 
             if path == '/api/settings':
@@ -1438,6 +1713,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        if parsed.path == '/api/history':
+            HISTORY.clear()
+            return self._json({'ok': True})
         m = re.fullmatch(r'/api/sources/([\w.:-]+)', parsed.path)
         if not m:
             return self._json({'ok': False, 'error': '接口不存在'}, 404)
@@ -1465,6 +1743,9 @@ def main():
         CONFIG_PATH, '已存在' if os.path.exists(CONFIG_PATH) else '将使用默认配置'))
     print('[init] 数据目录: %s%s' % (
         DATA_DIR, '' if DATA_DIR == APP_DIR else ' (已持久化, 重启不丢失)'))
+    print('[init] 历史节点池: %d 个节点 (%s)' % (
+        len(HISTORY), '复测已开启' if STORE.get()['settings'].get('history_test_enabled', True)
+        else '复测已关闭'))
 
     # 启动时预生成 cfdata 配置文件, 避免首次正式任务被中断
     binary = RUNNER.locate_binary()

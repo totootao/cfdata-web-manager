@@ -50,6 +50,7 @@ nav button:hover{color:var(--text)}
 .grid{display:grid;gap:14px}
 .g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 .g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
 .field{display:flex;flex-direction:column;gap:6px}
 .field label{font-size:12px;color:var(--muted);font-weight:600}
 .field .hint{font-size:11px;color:var(--dim)}
@@ -135,7 +136,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
   .stat .v{font-size:17px}
   .card{padding:14px}
   #logbox{height:250px;font-size:11px}
-  .grid.g2,.grid.g3{grid-template-columns:1fr}
+  .grid.g2,.grid.g3,.grid.g4{grid-template-columns:1fr}
   /* 源列表表格 → 卡片式布局 */
   table.resp{display:block;width:100%}
   table.resp tbody{display:block;width:100%}
@@ -215,6 +216,19 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
         <tbody id="srcBody"><tr><td colspan="4" class="empty">暂无数据</td></tr></tbody>
       </table>
     </div>
+    <div class="card">
+      <h2>历史节点池
+        <span id="histCount" style="color:var(--muted);font-size:12px"></span>
+        <span class="spacer"></span>
+        <button class="btn-danger btn-sm" onclick="clearHistory()">清空节点池</button>
+      </h2>
+      <div class="desc">每轮测速的达标节点自动入池（记录原始来源，复测只刷新速度不改变归属）；连续失败或超出滚动窗口的节点自动移出</div>
+      <div id="histStats" style="margin-bottom:10px;font-size:12px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap;align-items:center"></div>
+      <table class="resp">
+        <thead><tr><th>节点</th><th style="width:100px">最近速度</th><th style="width:100px">历史最佳</th><th style="width:80px">出现次数</th><th style="width:80px">连续失败</th><th style="width:140px">来源</th><th style="width:150px">最近运行</th></tr></thead>
+        <tbody id="histBody"><tr><td colspan="7" class="empty">暂无数据</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <!-- 定时任务 -->
@@ -279,6 +293,21 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
         <div class="field"><label>跳过代理环境检测 (-skipgeo)</label>
           <select id="sSkipGeo"><option value="true">是（服务器/Docker 推荐）</option><option value="false">否（严格检测）</option></select>
           <div class="hint">无交互环境下关闭检测会导致任务被取消</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>历史节点复测</h2>
+      <div class="desc">每轮测速的达标节点自动入池（滚动窗口并集）；开启复测后，池内节点将作为第一个"源"参与下轮测试，与 API 源结果合并排名，API 源全部失效时仍可兜底出结果</div>
+      <div class="grid g4">
+        <div class="field"><label>启用历史节点复测</label>
+          <select id="sHistEnabled"><option value="true">是（推荐）</option><option value="false">否</option></select>
+          <div class="hint">池为空时自动跳过，不影响任务</div></div>
+        <div class="field"><label>池容量上限</label><input type="number" id="sHistCap" min="1" step="1">
+          <div class="hint">超出后挤出最近速度最慢的节点（默认 250）</div></div>
+        <div class="field"><label>滚动窗口（次）</label><input type="number" id="sHistWindow" min="1" step="1">
+          <div class="hint">只保留最近 N 次运行中出现过的节点（默认 5）</div></div>
+        <div class="field"><label>连续失败淘汰（次）</label><input type="number" id="sHistEvict" min="1" step="1">
+          <div class="hint">连续 K 次复测不达标即移出池（默认 3）</div></div>
       </div>
     </div>
     <div class="card">
@@ -353,7 +382,7 @@ function switchTab(id, btn){
   ['tab-run','tab-src','tab-cron','tab-set','tab-res'].forEach(t=>$(t).style.display = t===id?'':'none');
   curTab = id;
   if(id==='tab-res') loadRuns();
-  if(id==='tab-src') loadSources();
+  if(id==='tab-src'){ loadSources(); loadHistory(); }
   if(id==='tab-cron') loadCronState();
 }
 
@@ -430,8 +459,9 @@ function renderState(d){
     const st={success:'成功',error:'失败',canceled:'取消'}[d.last_run.status]||d.last_run.status;
     $('stLast').textContent = st+' · '+d.last_run.top_count+'节点';
   }
-  // 任务刚结束时刷新"最新结果"卡片(仅结果页)
+  // 任务刚结束时刷新"最新结果"卡片(仅结果页)与节点池卡片(仅源管理页)
   if(window._wasRunning && !d.running && curTab==='tab-res') loadLatest();
+  if(window._wasRunning && !d.running && curTab==='tab-src') loadHistory();
   window._wasRunning = d.running;
 }
 
@@ -514,6 +544,42 @@ async function delSource(id,name){
   }catch(e){ toast(e.message,false) }
 }
 
+/* ---------- 历史节点池 ---------- */
+async function loadHistory(){
+  try{
+    const j = await api('/api/history'); const d = j.data;
+    const body = $('histBody');
+    if(!d.nodes.length){
+      body.innerHTML='<tr><td colspan="7" class="empty">节点池为空，完成一次任务后达标节点会自动积累</td></tr>';
+    }else{
+      body.innerHTML = d.nodes.map(n=>`
+        <tr>
+          <td data-label="节点"><b>${esc(n.ipport)}</b></td>
+          <td data-label="最近速度" style="color:var(--ok);font-weight:600">${esc(n.last_speed_text||'-')}</td>
+          <td data-label="历史最佳">${esc(n.best_speed_text||'-')}</td>
+          <td data-label="出现次数">${n.hits??1}</td>
+          <td data-label="连续失败">${(n.fail_streak||0)>0?'<span style="color:var(--warn);font-weight:600">'+n.fail_streak+'</span>':'0'}</td>
+          <td data-label="来源" title="${esc((n.origins||[]).join('、'))}">${esc((n.origins||[]).join('、')||'-')}</td>
+          <td data-label="最近运行">${esc(n.last_seen||'-')}</td>
+        </tr>`).join('');
+    }
+    $('histCount').textContent = `（共 ${d.nodes.length} 个）`;
+    const by = (d.stats&&d.stats.by_origin)||{};
+    const parts = Object.keys(by).map(k=>esc(k)+' × '+by[k]);
+    $('histStats').innerHTML =
+      `总节点: <b style="color:var(--text)">${d.nodes.length}</b>`
+      + (parts.length?`<span>贡献: ${parts.join(' · ')}</span>`:'')
+      + `<span>复测: ${d.enabled?'<b style="color:var(--ok)">已开启</b>':'<b style="color:var(--warn)">已关闭</b>'}</span>`;
+  }catch(e){ toast(e.message,false) }
+}
+async function clearHistory(){
+  if(!confirm('确定清空历史节点池？清空后需重新运行任务积累')) return;
+  try{
+    await api('/api/history',{method:'DELETE'});
+    toast('节点池已清空'); loadHistory();
+  }catch(e){ toast(e.message,false) }
+}
+
 /* ---------- 定时任务 ---------- */
 function loadCronState(){
   if(!stateCache) return;
@@ -550,6 +616,10 @@ async function loadSettings(){
     $('sTimeout').value=s.timeout_minutes; $('sTls').value=String(!!s.tls);
     $('sQualified').value=String(!!s.qualified);
     $('sSkipGeo').value=String(s.skip_geo_check!==false);
+    $('sHistEnabled').value=String(s.history_test_enabled!==false);
+    $('sHistCap').value=s.history_pool_capacity??250;
+    $('sHistWindow').value=s.history_window_runs??5;
+    $('sHistEvict').value=s.history_evict_fails??3;
     $('nTemplate').value=n.name_template; $('nPassword').value=n.password;
     $('nSni').value=n.sni; $('nHost').value=n.host; $('nPath').value=n.path;
     $('nFp').value=n.client_fingerprint||'chrome'; $('nSkip').value=String(!!n.skip_cert_verify);
@@ -570,6 +640,10 @@ async function saveSettings(){
     source_retry_delay:(v=>isNaN(v)?5:Math.max(0,v))(+$('sRetryDelay').value),
     timeout_minutes:+$('sTimeout').value, tls:$('sTls').value==='true',
     qualified:$('sQualified').value==='true', skip_geo_check:$('sSkipGeo').value==='true', binary_path:$('sBinary').value.trim(),
+    history_test_enabled:$('sHistEnabled').value==='true',
+    history_pool_capacity:Math.max(1, +$('sHistCap').value||250),
+    history_window_runs:Math.max(1, +$('sHistWindow').value||5),
+    history_evict_fails:Math.max(1, +$('sHistEvict').value||3),
     node:{
       name_template:$('nTemplate').value.trim(), password:$('nPassword').value,
       sni:$('nSni').value.trim(), host:$('nHost').value.trim(), path:$('nPath').value,
