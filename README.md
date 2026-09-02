@@ -126,7 +126,8 @@ cfdata_web/
 │   ├── history_nodes.json # 历史节点池（达标节点 + 来源归属 + 淘汰状态）
 │   ├── qa_runs.json       # 质检记录（最近 50 条：检查/保留/剔除统计）
 │   ├── cfdata-config.json # cfdata CLI 配置（本地运行时直接生成在应用目录）
-│   └── locations.json     # 数据中心位置缓存（本地运行时直接生成在应用目录）
+│   ├── locations.json     # 数据中心位置缓存（本地运行时直接生成在应用目录）
+│   └── GeoLite2-ASN.mmdb  # ASN 数据库共享缓存（首次运行下载一次，之后各任务目录复用不再重复下载）
 └── results/               # 运行时自动生成
     ├── runs.json          # 运行记录索引
     ├── latest/            # 最新一次成功任务的固定结果目录（自动覆盖更新）

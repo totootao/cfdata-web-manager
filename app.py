@@ -48,6 +48,10 @@ else:
 CONFIG_PATH = os.path.join(DATA_DIR, 'config.json')
 CFDATA_CONFIG_PATH = os.path.join(DATA_DIR, 'cfdata-config.json')
 LOCATIONS_CACHE_PATH = os.path.join(DATA_DIR, 'locations.json')
+# GeoLite2-ASN.mmdb 共享缓存: CLI 在工作目录找不到该文件时会重新下载,
+# 预先从数据目录拷贝可让每个任务目录都复用同一份, 避免重复下载
+MMDB_NAME = 'GeoLite2-ASN.mmdb'
+MMDB_CACHE_PATH = os.path.join(DATA_DIR, MMDB_NAME)
 # 历史节点池(跨轮复测的达标节点集合), 同样存放于数据目录以持久化
 HISTORY_POOL_PATH = os.path.join(DATA_DIR, 'history_nodes.json')
 HISTORY_SOURCE_ID = '__history__'
@@ -1077,11 +1081,18 @@ class TaskRunner:
     def _exec_cmd(self, cmd, work_dir, out_path, settings, log, label):
         """在工作目录执行一次 cfdata 命令(流式读日志/超时/取消), 返回 (rows, exit_code, error)"""
         proc = None
-        # 复用已缓存的 locations.json, 避免每次运行都重新下载数据中心位置信息
+        # 复用已缓存的 locations.json / GeoLite2-ASN.mmdb, 避免每次运行都在
+        # 任务目录里重复下载(存在即复用, 首次缺失时才真正下载并回写缓存)
         cached_locations = LOCATIONS_CACHE_PATH
         if os.path.exists(cached_locations):
             try:
                 shutil.copyfile(cached_locations, os.path.join(work_dir, 'locations.json'))
+            except Exception:
+                pass
+        if os.path.exists(MMDB_CACHE_PATH):
+            try:
+                shutil.copyfile(MMDB_CACHE_PATH, os.path.join(work_dir, MMDB_NAME))
+                log('复用缓存的 %s (data 目录, 跳过下载)' % MMDB_NAME)
             except Exception:
                 pass
         strict_geo = not bool(settings.get('skip_geo_check', True))
@@ -1107,11 +1118,17 @@ class TaskRunner:
             if code != 0:
                 log('%s 进程退出码 %d' % (label, code))
             rows = self._parse_csv(out_path)
-            # 回写缓存 locations.json, 供后续运行复用(避免重复下载)
+            # 回写缓存 locations.json / GeoLite2-ASN.mmdb, 供后续运行复用(避免重复下载)
             run_locations = os.path.join(work_dir, 'locations.json')
             if os.path.exists(run_locations):
                 try:
                     shutil.copyfile(run_locations, cached_locations)
+                except Exception:
+                    pass
+            run_mmdb = os.path.join(work_dir, MMDB_NAME)
+            if os.path.exists(run_mmdb):
+                try:
+                    shutil.copyfile(run_mmdb, MMDB_CACHE_PATH)
                 except Exception:
                     pass
             return rows, code, None
