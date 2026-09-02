@@ -1381,12 +1381,14 @@ class TaskRunner:
 
     # ---- 质检子任务 ----
     def _run_qa(self, trigger):
-        """复测 latest 的原始 Top 节点, 低于速度阈值的从 top_nodes.txt/.yaml 剔除
+        """复测 latest 的原始 Top 节点, 未达标节点从 top_nodes.txt/.yaml 剔除
 
         输入固定为 results/latest/qa_input.txt(完整任务提取的原始 Top 列表, 每次全量复测
-        不随剔除缩小, 被剔除节点速度恢复后自动回归); 工作目录固定为 results/qa/ 只保留
-        最近一次。与主任务共用执行锁; 只重写 latest 的两个 Top 文件并在 meta.json 追加
-        质检信息, 不触碰 runs 历史记录、历史节点池与主任务的合并/排序/提取逻辑。
+        不随剔除缩小); 工作目录固定为 results/qa/ 只保留最近一次。
+        CLI 的结果文件只包含达标节点(-nsbspeedmin 由 CLI 自行过滤), 因此未出现在结果
+        文件中的节点视为本次测速未达标/失联, 一并剔除 —— 节点仍留在基准中, 下次质检
+        达标后自动回归。与主任务共用执行锁; 只重写 latest 的两个 Top 文件并在 meta.json
+        追加质检信息, 不触碰 runs 历史记录、历史节点池与主任务的合并/排序/提取逻辑。
         """
         run_id = 'qa_' + datetime.now().strftime('%Y%m%d_%H%M%S')
         self.log = LogBuffer()
@@ -1443,24 +1445,31 @@ class TaskRunner:
                 % (len(ipports), QA_INPUT_NAME, speed_min, input_name))
 
             out_name = 'qa.csv'
+            out_path = os.path.join(work_dir, out_name)
             cmd = self._build_cmd(binary, settings, out_name, input_name=input_name)
-            rows, code, err = self._exec_cmd(cmd, work_dir, os.path.join(work_dir, out_name),
-                                             settings, log, '质检')
+            rows, code, err = self._exec_cmd(cmd, work_dir, out_path, settings, log, '质检')
             if self._cancel:
                 raise _CanceledError()
-            if (code != 0) or not rows or err:
+            if (code != 0) or err:
                 raise RuntimeError('质检 CLI 执行失败 (退出码 %s, 结果 %d 行%s), latest 保持原样'
                                    % (code if code is not None else '异常', len(rows),
                                       ', ' + err if err else ''))
+            # CLI 正常退出但没生成结果文件 = 异常运行, 保守放弃本次质检
+            if not os.path.isfile(out_path):
+                raise RuntimeError('质检 CLI 未生成结果文件, latest 保持原样')
+            # 注: 结果文件允许 0 数据行 —— CLI 只输出达标节点, 全空说明本次全部未达标
 
-            # 分类: 达标保留 / 低于阈值剔除; 未出现在结果中的节点原样保留(未测不判死刑)
+            # 分类: 出现在结果文件中的 = 实测达标保留; 未出现的 = 本次测速未达标, 一并剔除。
+            # cfdata 的 CSV 只输出达标节点(-nsbspeedmin 由 CLI 自行过滤), 因此"不在结果里"
+            # 就是本次不达标/失联; 被剔除节点仍留在 qa_input 基准中, 下次达标自动回归(自愈)。
             by_key = {r['ipport']: r for r in rows}
             current_set = set(read_latest_top_ipports())  # 上次质检后的订阅内容
-            kept, pruned, missed_rows, revived = [], [], [], []
-            for ipport, note in ipports_with_note:
+            kept, pruned, failed, revived = [], [], [], []
+            for ipport, _note in ipports_with_note:
                 r = by_key.get(ipport)
                 if r is None:
-                    missed_rows.append(_ghost_row(ipport, note))
+                    failed.append(ipport)
+                    pruned.append({'ipport': ipport, 'speed': '未出现在结果中'})
                     continue
                 if r['speed'] is not None and r['speed'] >= speed_min:
                     kept.append(r)
@@ -1469,14 +1478,14 @@ class TaskRunner:
                 else:
                     pruned.append({'ipport': ipport, 'speed': r['speed_text']})
             kept.sort(key=lambda r: (-r['speed'], r['latency_ms'] or 0, r['ipport']))
-            # 未测到的节点追加在末尾(按原文件顺序), 不参与速度排序
-            final_rows = kept + missed_rows
-            missed = [r['ipport'] for r in missed_rows]
-            if missed:
-                log('警告: %d 个节点未出现在质检结果中, 原样保留: %s'
-                    % (len(missed), ', '.join(missed[:10]) + ('…' if len(missed) > 10 else '')))
+            final_rows = kept
+            failed_set = set(failed)
             for p in pruned:
-                log('剔除: %s (本次 %s, 低于 %.2f MB/s)' % (p['ipport'], p['speed'], speed_min))
+                if p['ipport'] in failed_set:
+                    log('剔除: %s (未出现在质检结果中, 本次测速未达标或失联; '
+                        '基准保留, 恢复达标后自动回归)' % p['ipport'])
+                else:
+                    log('剔除: %s (本次 %s, 低于 %.2f MB/s)' % (p['ipport'], p['speed'], speed_min))
             for v in revived:
                 log('回归: %s (本次 %s, 速度已恢复达标, 重新写回订阅文件)' % (v['ipport'], v['speed']))
 
@@ -1486,28 +1495,26 @@ class TaskRunner:
             prev_meta = load_latest_meta() or {}
             info = {
                 'id': run_id, 'trigger': trigger, 'at': now_str(),
-                'checked': len(ipports), 'kept': len(kept),
-                'kept_untested': len(missed_rows), 'file_count': len(final_rows),
+                'checked': len(ipports), 'kept': len(kept), 'file_count': len(final_rows),
                 'pruned_count': len(pruned), 'revived_count': len(revived),
                 'pruned': [{'ipport': p['ipport'], 'speed': p['speed']} for p in pruned],
                 'revived': [{'ipport': v['ipport'], 'speed': v['speed']} for v in revived],
                 'source_run_id': prev_meta.get('run_id', ''),
-                'missed': missed,
+                'failed': failed,
             }
             update_latest_meta_qa(info)
             save_qa_record({'id': run_id, 'trigger': trigger, 'started_at': self.state.get('started_at'),
                             'finished_at': now_str(), 'status': 'success',
                             'checked': len(ipports), 'kept': len(kept),
-                            'kept_untested': len(missed_rows), 'pruned_count': len(pruned),
-                            'revived_count': len(revived),
+                            'pruned_count': len(pruned), 'revived_count': len(revived),
                             'pruned': [p['ipport'] for p in pruned],
                             'revived': [v['ipport'] for v in revived],
                             'latest_run_id': prev_meta.get('run_id', ''), 'error': ''})
-            log('质检完成: 检查 %d 个, 保留 %d 个(另有 %d 个未测到原样保留), 剔除 %d 个, 回归 %d 个 '
+            log('质检完成: 检查 %d 个, 保留 %d 个, 剔除 %d 个(其中 %d 个未出现在结果中), 回归 %d 个 '
                 '(latest 已重写, 运行历史/历史池未动)'
-                % (len(ipports), len(kept), len(missed_rows), len(pruned), len(revived)))
+                % (len(ipports), len(kept), len(pruned), len(failed), len(revived)))
             if not final_rows:
-                log('警告: Top 节点已全部低于阈值, latest 订阅内容为空, 建议尽快触发一次完整任务')
+                log('警告: Top 节点本次全部未达标, latest 订阅内容为空, 建议尽快触发一次完整任务')
             log('===== 质检完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       message='质检完成: 保留 %d / 剔除 %d / 回归 %d'
@@ -1716,23 +1723,6 @@ def read_qa_input_lines():
     return lines
 
 
-def _ghost_row(ipport, note):
-    """用原行注释构造一个"未测到"节点的行记录, 使其可原样保留进重写后的文件"""
-    speed_text, dc, loc = note, '', ''
-    parts = note.rsplit('-', 2)
-    if len(parts) == 3:
-        speed_text, dc, loc = parts[0].strip(), parts[1].strip(), parts[2].strip()
-    speed = parse_speed_mb(speed_text)
-    ip, port_s = ipport.rsplit(':', 1)
-    return {
-        'ip': ip, 'port': port_s, 'ipport': ipport,
-        'speed': speed if speed is not None else -1.0,
-        'speed_text': speed_text or '未质检',
-        'latency': '', 'latency_ms': 0,
-        'dc': dc, 'loc': loc, 'region': '', 'city': '',
-    }
-
-
 def update_latest_meta_qa(info):
     """在 latest/meta.json 追加质检信息; top_count 同步为重写后文件中的实际节点数"""
     meta_path = os.path.join(LATEST_DIR, 'meta.json')
@@ -1747,10 +1737,10 @@ def update_latest_meta_qa(info):
             except Exception:
                 data = {}
         data['qa'] = info
-        # file_count = 实测达标 + 未测到原样保留, 即重写后文件的节点数
+        # file_count = 重写后文件中的实际节点数(本次实测达标保留的节点)
         file_count = info.get('file_count')
         if file_count is None:
-            file_count = info.get('kept', 0) + len(info.get('missed') or [])
+            file_count = info.get('kept', 0)
         data['top_count'] = file_count if file_count is not None else data.get('top_count', 0)
         tmp = meta_path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
