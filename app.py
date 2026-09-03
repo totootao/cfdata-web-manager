@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+import urllib.request
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(APP_DIR, 'results')
@@ -71,6 +72,10 @@ QA_WORK_DIR = os.path.join(RESULTS_DIR, 'qa')
 # 不随剔除缩小 —— 被剔除的节点速度恢复后自动回归订阅文件
 QA_INPUT_NAME = 'qa_input.txt'
 QA_INPUT_PATH = os.path.join(LATEST_DIR, QA_INPUT_NAME)
+# 订阅模板(FlClash 完整订阅转换): 缓存于数据目录, 每天最多重新拉取一次
+SUB_TEMPLATE_PATH = os.path.join(DATA_DIR, 'sub_template.yaml')
+SUB_TEMPLATE_META_PATH = os.path.join(DATA_DIR, 'sub_template.json')
+SUB_TEMPLATE_STALE_HOURS = 24
 
 # CSV 导出字段(传给 cfdata -fields), 与中文表头一一对应
 CSV_FIELDS = 'ipport,latency,speed,dc,loc,region,city'
@@ -107,6 +112,9 @@ DEFAULT_CONFIG = {
         'official_v6_enabled': False,   # 作为附加伪源扫描 Cloudflare 官方 IPv6 地址库(-mode=official -offiptype=6)
         'official_v6_count': 20,        # -offspeedlimit 官方模式测速达标结果上限(达标即停止)
         'official_v6_delay': 500,       # -offdelay 官方模式延迟阈值(毫秒), 超过剔除
+        # ---- FlClash 订阅模板转换 ----
+        'sub_convert_enabled': False,   # 把 latest 的 top_nodes.yaml / top_nodes_v6.yaml 按模板转为完整 Clash 订阅
+        'sub_convert_url': '',          # 订阅模板链接(完整 Clash 配置; 其节点列表将被平台实测 Top 节点替换, 规则/策略组保留)
         'speedtest_threads': 5,     # -nsbspeedtest 测速线程数
         'speed_min': 5.0,           # -nsbspeedmin 最低速度 MB/s
         'speed_limit': 9999,        # -nsbspeedlimit 测速结果上限
@@ -221,6 +229,238 @@ def render_name_template(template, fields):
         val = fields.get(key, '')
         return str(val) if val is not None else ''
     return re.sub(r'\{(\w+)\}', repl, template or '')
+
+
+# ---------------------------------------------------------------- 订阅模板(FlClash 完整订阅转换)
+_SUB_TPL_LOCK = threading.RLock()
+
+
+def _sub_template_meta():
+    """读取订阅模板缓存元数据; 无缓存返回 {}"""
+    try:
+        with open(SUB_TEMPLATE_META_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _sub_template_age_hours():
+    """模板缓存年龄(小时); 从未拉取返回 None"""
+    fetched = _sub_template_meta().get('fetched_at') or ''
+    try:
+        t = datetime.strptime(fetched, '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return None
+    return (datetime.now() - t).total_seconds() / 3600.0
+
+
+def _sub_template_stats(text):
+    """统计模板的节点/策略组/规则数量(状态展示与日志用)"""
+    proxies = groups = rules = 0
+    section = ''
+    for ln in text.splitlines():
+        if ln == 'proxies:':
+            section = 'p'
+        elif ln == 'proxy-groups:':
+            section = 'g'
+        elif ln == 'rules:':
+            section = 'r'
+        elif section == 'p' and re.match(r'\s*-\s*\{', ln):
+            proxies += 1
+        elif section == 'g' and re.match(r'\s*-\s*name:', ln):
+            groups += 1
+        elif section == 'r' and ln.strip():
+            rules += 1
+    return proxies, groups, rules
+
+
+def fetch_sub_template(url, timeout=30):
+    """拉取订阅模板文本; 支持 http(s):// 与 file://(离线/测试); 校验为 Clash 配置"""
+    url = (url or '').strip()
+    if not url:
+        raise ValueError('订阅模板链接为空')
+    if url.startswith('file://'):
+        with open(url[len('file://'):], 'r', encoding='utf-8') as f:
+            return f.read()
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        raise ValueError('订阅模板链接必须是 http(s):// 或 file:// 链接')
+    req = urllib.request.Request(url, headers={'User-Agent': 'clash.meta/1.18.0'})
+    last = None
+    for _ in range(3):  # 转换后端不稳定, 重试 3 次
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                text = resp.read().decode('utf-8', 'replace')
+            if 'proxies:' not in text or 'proxy-groups:' not in text:
+                raise ValueError('返回内容不是有效的 Clash 配置(缺少 proxies/proxy-groups)')
+            return text
+        except Exception as e:
+            last = e
+            time.sleep(2)
+    raise RuntimeError('获取订阅模板失败(已重试 3 次): %s' % last)
+
+
+def refresh_sub_template(settings, force=False, ignore_enabled=False):
+    """按需刷新订阅模板缓存(超过 24 小时或强制); 返回 (模板文本|None, 状态消息)
+
+    拉取失败时沿用上次缓存(仅记录消息不中断任务); 未启用且非强制时返回 (None, 提示)。
+    """
+    url = (settings.get('sub_convert_url') or '').strip()
+    if not url or (not settings.get('sub_convert_enabled') and not ignore_enabled):
+        return None, '订阅模板转换未启用'
+    with _SUB_TPL_LOCK:
+        cached = None
+        if os.path.isfile(SUB_TEMPLATE_PATH):
+            try:
+                with open(SUB_TEMPLATE_PATH, 'r', encoding='utf-8') as f:
+                    cached = f.read()
+            except Exception:
+                cached = None
+        age = _sub_template_age_hours()
+        if not force and cached is not None and age is not None \
+                and age < SUB_TEMPLATE_STALE_HOURS:
+            return cached, ('订阅模板: 沿用缓存(%.1f 小时前拉取, 未满 %d 小时不重复获取)'
+                            % (age, SUB_TEMPLATE_STALE_HOURS))
+        try:
+            text = fetch_sub_template(url)
+        except Exception as e:
+            if cached is not None:
+                return cached, '订阅模板: 本次获取失败(%s), 沿用上次缓存' % e
+            return None, '订阅模板: 获取失败且无缓存(%s)' % e
+        proxies, groups, rules = _sub_template_stats(text)
+        meta = {'fetched_at': now_str(), 'url': url,
+                'proxy_count': proxies, 'group_count': groups, 'rule_count': rules}
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = SUB_TEMPLATE_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(text)
+        os.replace(tmp, SUB_TEMPLATE_PATH)
+        tmp = SUB_TEMPLATE_META_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SUB_TEMPLATE_META_PATH)
+        return text, ('订阅模板: 已刷新(%d 个节点 / %d 个策略组 / %d 条规则, 缓存于数据目录)'
+                      % (proxies, groups, rules))
+
+
+def load_sub_template_text():
+    """读取缓存的订阅模板文本; 无缓存返回 None"""
+    try:
+        with open(SUB_TEMPLATE_PATH, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def sub_template_status():
+    """订阅模板状态(设置页展示): 启用情况/缓存时间/模板规模"""
+    cfg = STORE.get()
+    settings = cfg.get('settings', {})
+    meta = _sub_template_meta()
+    age = _sub_template_age_hours()
+    return {
+        'enabled': bool(settings.get('sub_convert_enabled')),
+        'url': (settings.get('sub_convert_url') or '').strip(),
+        'exists': os.path.isfile(SUB_TEMPLATE_PATH),
+        'fetched_at': meta.get('fetched_at') or '',
+        'age_hours': None if age is None else round(age, 1),
+        'proxy_count': meta.get('proxy_count'),
+        'group_count': meta.get('group_count'),
+        'rule_count': meta.get('rule_count'),
+        'stale_hours': SUB_TEMPLATE_STALE_HOURS,
+    }
+
+
+def _flow_scalar(v):
+    """YAML 流式映射({k: v})里的标量: 简单值不加引号, 其余加双引号(IPv6 地址含冒号)"""
+    s = str(v)
+    if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/@+-]*', s):
+        return s
+    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def render_clash_subscription(template_text, entries):
+    """按模板生成完整 Clash 订阅文本; entries: [(节点名, server, port)]
+
+    保留模板的 DNS/端口/策略组结构与全部规则原文; proxies 段替换为平台实测 Top
+    节点(连接参数 uuid/servername/ws-opts 克隆自模板首个节点, 只换 name/server/
+    port —— 与原订阅"同 uuid 不同 IP"机制一致); 各策略组成员列表中的模板节点名
+    同步替换为我们的节点名(DIRECT/REJECT/其他组引用成员原样保留)。
+    模板结构不符合预期时抛 ValueError, 由调用方回退片段格式。
+    """
+    if not entries:
+        raise ValueError('节点列表为空')
+    lines = template_text.splitlines()
+    idx_proxies = idx_groups = idx_rules = None
+    for i, ln in enumerate(lines):
+        if ln == 'proxies:' and idx_proxies is None:
+            idx_proxies = i
+        elif ln == 'proxy-groups:' and idx_groups is None:
+            idx_groups = i
+        elif ln == 'rules:' and idx_rules is None:
+            idx_rules = i
+    if idx_proxies is None or idx_groups is None or idx_groups <= idx_proxies:
+        raise ValueError('模板缺少 proxies/proxy-groups 顶层段')
+    groups_end = idx_rules if (idx_rules is not None and idx_rules > idx_groups) \
+        else len(lines)
+
+    # ---- proxies 段: 模板节点行(流式映射)与首个节点的参数模板 ----
+    proxy_line_re = re.compile(r'^\s*-\s*\{.*\}\s*$')
+    proxy_lines = [ln for ln in lines[idx_proxies + 1:idx_groups]
+                   if proxy_line_re.match(ln)]
+    if not proxy_lines:
+        raise ValueError('模板 proxies 段没有流式节点行')
+    head_re = re.compile(r'\bname:\s*([^,{}]+?),\s*\bserver:\s*([^,{}]+?),\s*\bport:\s*([^,{}]+?),')
+    tpl_names = set()
+    for pl in proxy_lines:
+        m = head_re.search(pl)
+        if m:
+            tpl_names.add(m.group(1).strip())
+    first = proxy_lines[0]
+    if not head_re.search(first):
+        raise ValueError('模板节点行无法解析 name/server/port')
+
+    def _proxy_line(name, server, port):
+        ln = re.sub(r'\bname:\s*[^,{}]+?,',
+                    lambda mm: 'name: %s,' % _flow_scalar(name), first, count=1)
+        ln = re.sub(r'\bserver:\s*[^,{}]+?,',
+                    lambda mm: 'server: %s,' % _flow_scalar(server), ln, count=1)
+        ln = re.sub(r'\bport:\s*[^,{}]+?,',
+                    lambda mm: 'port: %s,' % str(port), ln, count=1)
+        return ln
+
+    # ---- proxy-groups 段: 成员列表里的模板节点名替换为我们的节点名 ----
+    group_flow_re = re.compile(r'^\s*-\s*\{')
+    group_start_re = re.compile(r'^\s*-\s*name:')
+    out_groups = []
+    in_members = False
+    injected = False
+    for ln in lines[idx_groups + 1:groups_end]:
+        if group_flow_re.match(ln):
+            raise ValueError('模板 proxy-groups 使用流式行, 暂不支持解析')
+        if group_start_re.match(ln):
+            injected = False
+            in_members = False
+            out_groups.append(ln)
+            continue
+        if re.match(r'^\s*[\w-]+\s*:', ln):  # 组内键行(type:/url:/proxies: 等)
+            in_members = ln.strip().startswith('proxies:')
+            out_groups.append(ln)
+            continue
+        m = re.match(r'^(\s*-\s+)(.+?)\s*$', ln)
+        if m and in_members and m.group(2).strip() in tpl_names:
+            if not injected:  # 首个节点成员处展开全部新节点, 后续模板节点行删除
+                for name, _srv, _port in entries:
+                    out_groups.append(m.group(1) + _flow_scalar(name))
+                injected = True
+            continue
+        out_groups.append(ln)
+
+    header = lines[:idx_proxies]
+    new_proxies = ['proxies:'] + [_proxy_line(n, s, p) for n, s, p in entries]
+    tail = lines[groups_end:]
+    return '\n'.join(header + new_proxies + ['proxy-groups:'] + out_groups + tail) + '\n'
 
 
 def unique_name(name, used):
@@ -908,6 +1148,13 @@ class TaskRunner:
             else:
                 log('官方 IPv6 优选: 跳过 (未开启)')
 
+            # 订阅模板每日刷新(超过 24h 才重新拉取; 失败沿用缓存)
+            if settings.get('sub_convert_enabled') and (settings.get('sub_convert_url') or '').strip():
+                _, sub_msg = refresh_sub_template(settings)
+                log(sub_msg)
+            else:
+                log('订阅模板转换: 跳过 (未开启)')
+
             test_list = (([history_src] if history_src else [])
                          + ([official_v6_src] if official_v6_src else [])
                          + sources)
@@ -1025,7 +1272,7 @@ class TaskRunner:
                 ],
             }
             save_run_record(record)
-            self._sync_latest(run_dir, record, log)
+            self._sync_latest(run_dir, record, settings, log)
             # ---- 历史节点池更新(仅任务成功时; 取消/失败不动池) ----
             if api_results or history_rows is not None:
                 try:
@@ -1471,14 +1718,53 @@ class TaskRunner:
             'dc': r['dc'], 'loc': r['loc'],
         }
 
-    def _sync_latest(self, run_dir, record, log):
-        """将最新一次成功任务的结果同步到 results/latest/ (固定路径, 内容随每次任务更新)"""
+    def _sync_latest(self, run_dir, record, settings, log):
+        """将最新一次成功任务的结果同步到 results/latest/ (固定路径, 内容随每次任务更新)
+
+        启用订阅模板转换时, latest 的两个 Top YAML 在片段之上再生成完整 Clash
+        订阅(模板策略组/规则保留, 节点替换为本轮实测 Top), 订阅链接路径不变。
+        """
         try:
             os.makedirs(LATEST_DIR, exist_ok=True)
             for fname in LATEST_FILES:
                 src = os.path.join(run_dir, fname)
                 if os.path.isfile(src):
                     shutil.copyfile(src, os.path.join(LATEST_DIR, fname))
+            # 订阅模板转换: latest 的两个 Top YAML 由片段升级为完整 Clash 订阅
+            # (未启用/模板缺失/转换失败时保持片段格式, 不影响同步)
+            sub_converted = []
+            if settings.get('sub_convert_enabled'):
+                tpl_text = load_sub_template_text()
+                if tpl_text:
+                    for yaml_name, key in (('top_nodes.yaml', 'top_nodes'),
+                                           ('top_nodes_v6.yaml', 'top_v6_nodes')):
+                        entries, used = [], set()
+                        for n in record.get(key) or []:
+                            name = (n.get('name') or '').strip() \
+                                or '%s:%s' % (n.get('server'), n.get('port'))
+                            base, i = name, 2
+                            while name in used:  # Clash 节点名必须唯一
+                                name = '%s #%d' % (base, i)
+                                i += 1
+                            used.add(name)
+                            entries.append((name, n.get('server'), n.get('port')))
+                        if not entries:
+                            continue
+                        try:
+                            text = render_clash_subscription(tpl_text, entries)
+                            dst = os.path.join(LATEST_DIR, yaml_name)
+                            tmp = dst + '.tmp'
+                            with open(tmp, 'w', encoding='utf-8') as f:
+                                f.write(text)
+                            os.replace(tmp, dst)
+                            sub_converted.append(yaml_name)
+                            log('latest/%s 已按订阅模板转换为完整 Clash 订阅 (%d 个节点)'
+                                % (yaml_name, len(entries)))
+                        except Exception as e:
+                            log('latest/%s 订阅转换失败 (%s), 保留片段格式' % (yaml_name, e))
+                else:
+                    log('订阅模板缓存不存在, latest Top YAML 保持片段格式 '
+                        '(可先手动刷新模板, 再触发一次任务生成完整订阅)')
             # 原始 Top 节点基准: 质检每次都从这份完整列表复测, 不随剔除缩小
             # (v4 与 v6 双栈合并, 质检时一并复测保鲜)
             src_top = os.path.join(run_dir, 'top_nodes.txt')
@@ -1498,6 +1784,7 @@ class TaskRunner:
                 'top_v6_count': record.get('top_v6_count', 0),
                 'total_nodes': record.get('total_nodes', 0),
                 'per_source_count': record.get('per_source_count', 0),
+                'sub_converted': sub_converted,
                 'files': {'txt': 'top_nodes.txt', 'yaml': 'top_nodes.yaml',
                           'all': 'all_sorted.txt',
                           'v6_txt': 'top_nodes_v6.txt', 'v6_yaml': 'top_nodes_v6.yaml',
@@ -1632,6 +1919,11 @@ class TaskRunner:
             log('===== 质检开始 (%s 触发, 运行 ID %s) ====='
                 % ('定时' if trigger == 'cron' else '手动', run_id))
 
+            # 订阅模板每日刷新(超过 24h 才重新拉取; 质检也重写订阅, 需要模板)
+            if settings.get('sub_convert_enabled') and (settings.get('sub_convert_url') or '').strip():
+                _, sub_msg = refresh_sub_template(settings)
+                log(sub_msg)
+
             ipports_with_note = read_qa_input_lines()
             if not ipports_with_note:
                 raise RuntimeError('最新结果中没有可质检的节点')
@@ -1695,7 +1987,7 @@ class TaskRunner:
                 log('回归: %s (本次 %s, 速度已恢复达标, 重新写回订阅文件)' % (v['ipport'], v['speed']))
 
             # 只重写 latest 的 Top 文件(IPv4/IPv6 分开写; 分源/全量文件保留原样)
-            kept_v4_n, kept_v6_n = self._rewrite_latest_top(final_rows, settings, log)
+            kept_v4_n, kept_v6_n, sub_conv = self._rewrite_latest_top(final_rows, settings, log)
 
             prev_meta = load_latest_meta() or {}
             info = {
@@ -1706,6 +1998,7 @@ class TaskRunner:
                 'pruned': [{'ipport': p['ipport'], 'speed': p['speed']} for p in pruned],
                 'revived': [{'ipport': v['ipport'], 'speed': v['speed']} for v in revived],
                 'source_run_id': prev_meta.get('run_id', ''),
+                'sub_converted': sub_conv,
                 'failed': failed,
             }
             update_latest_meta_qa(info)
@@ -1756,10 +2049,14 @@ class TaskRunner:
 
         kept: 全部保留节点(混合双栈); 写入时按地址族拆分 ——
         IPv4 → top_nodes.txt / top_nodes.yaml, IPv6 → top_nodes_v6.txt / top_nodes_v6.yaml
+        启用订阅模板转换时, 两个 YAML 直接重写为完整 Clash 订阅(节点剔除后同步生效),
+        否则保持片段格式。
         """
         node_cfg = settings.get('node', {})
+        sub_tpl = load_sub_template_text() if settings.get('sub_convert_enabled') else None
         kept_v4 = [r for r in kept if ':' not in r['ip']]
         kept_v6 = [r for r in kept if ':' in r['ip']]
+        converted = []
 
         def _write_pair(rows, txt_name, yaml_name):
             txt_path = os.path.join(LATEST_DIR, txt_name)
@@ -1771,11 +2068,25 @@ class TaskRunner:
                                                r['dc'] or 'CF', r['loc'] or 'XX'))
             os.replace(tmp, txt_path)
             used_names = set()
+            names = [self._node_name(r, settings, used_names) for r in rows]
+            if sub_tpl and names:
+                try:
+                    entries = [(name, r['ip'], r['port'])
+                               for name, r in zip(names, rows)]
+                    text = render_clash_subscription(sub_tpl, entries)
+                    tmp = yaml_path + '.tmp'
+                    with open(tmp, 'w', encoding='utf-8') as f:
+                        f.write(text)
+                    os.replace(tmp, yaml_path)
+                    converted.append(yaml_name)
+                    return
+                except Exception as e:
+                    log('latest/%s 订阅转换失败 (%s), 本轮回退片段格式' % (yaml_name, e))
             tmp = yaml_path + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write('proxies:\n')
-                for r in rows:
-                    self._yaml_node(f, r, self._node_name(r, settings, used_names), node_cfg)
+                for name, r in zip(names, rows):
+                    self._yaml_node(f, r, name, node_cfg)
             os.replace(tmp, yaml_path)
 
         try:
@@ -1784,8 +2095,10 @@ class TaskRunner:
             _write_pair(kept_v6, 'top_nodes_v6.txt', 'top_nodes_v6.yaml')
             log('已重写 latest: top_nodes.txt / top_nodes.yaml (IPv4 %d 个) + '
                 'top_nodes_v6.txt / top_nodes_v6.yaml (IPv6 %d 个), '
-                '节点速度已刷新为本次质检实测值' % (len(kept_v4), len(kept_v6)))
-            return len(kept_v4), len(kept_v6)
+                '节点速度已刷新为本次质检实测值%s'
+                % (len(kept_v4), len(kept_v6),
+                   ', YAML 为完整 Clash 订阅(模板转换)' if sub_tpl else ''))
+            return len(kept_v4), len(kept_v6), converted
         except Exception as e:
             log('重写 latest 失败: %s' % e)
             raise
@@ -1971,6 +2284,8 @@ def update_latest_meta_qa(info):
         # kept_v4/kept_v6 = 重写后两套文件中的实际节点数(本次实测达标保留)
         data['top_count'] = info.get('kept_v4', info.get('kept', 0))
         data['top_v6_count'] = info.get('kept_v6', 0)
+        # 订阅转换标记同步为质检重写后的实际状态(空列表 = 回退片段格式)
+        data['sub_converted'] = info.get('sub_converted') or []
         tmp = meta_path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -2278,6 +2593,10 @@ class Handler(BaseHTTPRequestHandler):
                 }})
                 return
 
+            if path == '/api/sub_template':
+                self._json({'ok': True, 'data': sub_template_status()})
+                return
+
             m = re.fullmatch(r'/api/runs/([\w.:-]+)', path)
             if m:
                 rec = load_run_record(m.group(1))
@@ -2368,6 +2687,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/qa':
                 ok, msg = RUNNER.start_qa(trigger='manual')
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
+
+            if path == '/api/sub_template/refresh':
+                cfg = STORE.get()
+                _, msg = refresh_sub_template(cfg['settings'], force=True, ignore_enabled=True)
+                ok = os.path.isfile(SUB_TEMPLATE_PATH)
+                return self._json({'ok': ok, 'message': msg,
+                                   'data': sub_template_status()}, 200 if ok else 400)
 
             if path == '/api/qa_cron':
                 expr = (body.get('expr') or '').strip()

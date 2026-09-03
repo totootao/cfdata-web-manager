@@ -369,6 +369,21 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       </div>
     </div>
     <div class="card">
+      <h2>订阅模板（FlClash 完整订阅转换）</h2>
+      <div class="desc">填入完整 Clash 订阅链接作为模板：平台<b>每天自动拉取一次</b>（模板的分流规则变化自动跟进，拉取失败沿用上次缓存），每次任务与质检后把 latest 的 <b>top_nodes.yaml / top_nodes_v6.yaml</b> 按模板转换为完整订阅 —— 策略组与全部规则保留，节点列表替换为平台实测 Top 节点（连接参数 uuid/servername/ws 复用模板首个节点，只换 IP 和端口，与原订阅机制一致）。订阅链接路径不变；连接参数以模板为准，上方「节点模板」仅作用于片段格式与分源 YAML</div>
+      <div class="grid g2">
+        <div class="field"><label>启用订阅模板转换</label>
+          <select id="sSubConv"><option value="false">否（默认）</option><option value="true">是</option></select>
+          <div class="hint">未启用或模板缺失时，latest 的 YAML 保持纯 proxies 片段格式（兼容旧行为）</div></div>
+        <div class="field"><label>模板订阅链接</label><input type="text" id="sSubUrl" placeholder="https://example.com/sub?token=...&target=clash">
+          <div class="hint">完整 Clash 订阅（含 proxies/proxy-groups/rules）；支持 http(s):// 与 file:// 链接</div></div>
+      </div>
+      <div class="row" style="margin:14px 0 0">
+        <button class="btn-ghost" onclick="refreshSubTpl()">🔄 立即刷新模板</button>
+        <span id="subTplInfo" class="hint" style="align-self:center"></span>
+      </div>
+    </div>
+    <div class="card">
       <h2>cfdata 二进制</h2>
       <div class="desc">优先在应用目录查找 cfdata-linux-amd64，也可手动指定绝对路径</div>
       <div class="grid g2">
@@ -741,6 +756,9 @@ async function loadSettings(){
     $('sOffV6').value=String(!!s.official_v6_enabled);
     $('sOffV6Count').value=s.official_v6_count??20;
     $('sOffV6Delay').value=s.official_v6_delay??500;
+    $('sSubConv').value=String(!!s.sub_convert_enabled);
+    $('sSubUrl').value=s.sub_convert_url||'';
+    loadSubTpl();
     $('nTemplate').value=n.name_template; $('nPassword').value=n.password;
     $('nSni').value=n.sni; $('nHost').value=n.host; $('nPath').value=n.path;
     $('nFp').value=n.client_fingerprint||'chrome'; $('nSkip').value=String(!!n.skip_cert_verify);
@@ -768,6 +786,8 @@ async function saveSettings(){
     official_v6_enabled:$('sOffV6').value==='true',
     official_v6_count:Math.max(1, +$('sOffV6Count').value||20),
     official_v6_delay:Math.max(1, +$('sOffV6Delay').value||500),
+    sub_convert_enabled:$('sSubConv').value==='true',
+    sub_convert_url:$('sSubUrl').value.trim(),
     node:{
       name_template:$('nTemplate').value.trim(), password:$('nPassword').value,
       sni:$('nSni').value.trim(), host:$('nHost').value.trim(), path:$('nPath').value,
@@ -779,6 +799,33 @@ async function saveSettings(){
     toast('设置已保存');
     const b = await api('/api/binary');
     $('binaryInfo').innerHTML = b.data.found?'✅ 已找到: <b>'+esc(b.data.path)+'</b>':'❌ 未找到可执行文件';
+  }catch(e){ toast(e.message,false) }
+}
+
+/* ---------- 订阅模板状态/刷新 ---------- */
+function renderSubTpl(d){
+  const el = $('subTplInfo'); if(!el) return;
+  if(!d.enabled){ el.innerHTML='未启用'; return }
+  if(!d.exists){
+    el.innerHTML='未拉取过模板 —— 保存设置后随任务自动拉取，或点「立即刷新模板」';
+    return
+  }
+  const age = (d.age_hours==null) ? '' : '，缓存 '+d.age_hours+' 小时';
+  el.innerHTML = '模板已缓存：'+esc(String(d.proxy_count))+' 节点 / '+esc(String(d.group_count))+
+    ' 策略组 / '+esc(String(d.rule_count))+' 条规则，拉取于 '+esc(d.fetched_at)+age+
+    '（超过 '+d.stale_hours+' 小时随任务自动刷新）';
+}
+async function loadSubTpl(){
+  try{
+    const j = await api('/api/sub_template');
+    renderSubTpl(j.data);
+  }catch(e){ /* 静默: 状态展示失败不影响设置页 */ }
+}
+async function refreshSubTpl(){
+  try{
+    const j = await api('/api/sub_template/refresh',{method:'POST'});
+    renderSubTpl(j.data);
+    toast(j.message||'模板已刷新', !!j.ok);
   }catch(e){ toast(e.message,false) }
 }
 
@@ -796,12 +843,16 @@ async function loadLatest(){
     const subV6T  = location.origin+'/api/download/latest/top_nodes_v6.txt';
     const subByY  = location.origin+'/api/download/latest/top_by_source.yaml';
     const ex = d.exists||{};
+    const conv = d.sub_converted||[];
+    const v4sub = conv.includes('top_nodes.yaml');
+    const v6sub = conv.includes('top_nodes_v6.yaml');
     box.innerHTML = `
       <div class="runrow">
         <div class="row">
           <b>${esc(d.run_id||'')}</b>
           <span class="tag ok">最新</span>
           <span class="tag off">${tr}</span>
+          ${(v4sub||v6sub)?'<span class="tag ok">完整订阅</span>':''}
           <div class="spacer"></div>
           <span style="font-size:12px;color:var(--muted)">完成于 ${esc(d.finished_at||'')}</span>
         </div>
@@ -812,10 +863,10 @@ async function loadLatest(){
         </div>
         <div class="meta" style="margin-top:6px">
           ${ex.txt?`<a class="dl" href="/api/download/latest/top_nodes.txt">⬇ TXT(v4)</a>`:''}
-          ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML(v4)</a>`:''}
+          ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML(v4)${v4sub?' · 完整订阅':''}</a>`:''}
           ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量(v4)</a>`:''}
           ${ex.v6_txt?`<a class="dl" href="/api/download/latest/top_nodes_v6.txt">⬇ TXT(v6)</a>`:''}
-          ${ex.v6_yaml?`<a class="dl" href="/api/download/latest/top_nodes_v6.yaml">⬇ YAML(v6)</a>`:''}
+          ${ex.v6_yaml?`<a class="dl" href="/api/download/latest/top_nodes_v6.yaml">⬇ YAML(v6)${v6sub?' · 完整订阅':''}</a>`:''}
           ${ex.v6_all?`<a class="dl" href="/api/download/latest/all_sorted_v6.txt">⬇ 全量(v6)</a>`:''}
           ${ex.by_source?`<a class="dl" href="/api/download/latest/top_by_source.txt">⬇ 分源Top${d.per_source_count??5}</a>`:''}
           ${ex.by_source_yaml?`<a class="dl" href="/api/download/latest/top_by_source.yaml">⬇ 分源YAML</a>`:''}
