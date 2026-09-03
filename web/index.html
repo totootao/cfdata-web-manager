@@ -895,7 +895,7 @@ async function showRun(id){
       <tbody>${srcRows||'<tr><td colspan="7" class="empty">无</td></tr>'}</tbody></table></div>
       <div class="section-title">Top ${r.top_count||0} 节点 · IPv4（按速度降序）</div>
       <div class="table-scroll"><table><thead><tr><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
-      <tbody>${nodes||'<tr><td colspan="6" class="empty">无节点</td></tr>'></tbody></table></div>
+      <tbody>${nodes||'<tr><td colspan="6" class="empty">无节点</td></tr>'}</tbody></table></div>
       ${nodesV6?`<div class="section-title">Top ${r.top_v6_count||nodesV6.length} 节点 · IPv6（按速度降序，与 IPv4 分开输出）</div>
       <div class="table-scroll"><table><thead><tr><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
       <tbody>${nodesV6}</tbody></table></div>`:''}
