@@ -312,7 +312,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
         <div class="field"><label>分源提取最快前 N 个</label><input type="number" id="sPerSourceN" min="1" step="1">
           <div class="hint">测速完成后每个源单独提取速度最快的前 N 个（默认 5），输出 top_by_source.txt</div></div>
         <div class="field"><label>源失败重试次数</label><input type="number" id="sRetries" min="0" step="1">
-          <div class="hint">源获取/测试失败时自动重试次数（默认 3，0 = 不重试）</div></div>
+          <div class="hint">源执行失败（退出码非 0 / 异常）时自动重试次数（默认 3，0 = 不重试）；测速未达标不重试</div></div>
         <div class="field"><label>重试间隔(秒)</label><input type="number" id="sRetryDelay" min="0" step="1">
           <div class="hint">两次尝试之间的等待时间，默认 5 秒</div></div>
         <div class="field"><label>单源超时(分钟, 0=不限)</label><input type="number" id="sTimeout" min="0" step="1"></div>
@@ -807,7 +807,7 @@ function renderSubTpl(d){
   const el = $('subTplInfo'); if(!el) return;
   if(!d.enabled){ el.innerHTML='未启用'; return }
   if(!d.exists){
-    el.innerHTML='未拉取过模板 —— 保存设置后随任务自动拉取，或点「立即刷新模板」';
+    el.innerHTML='未拉取过模板 —— 填好模板订阅链接后点「立即刷新模板」立即拉取(自动保存该设置)';
     return
   }
   const age = (d.age_hours==null) ? '' : '，缓存 '+d.age_hours+' 小时';
@@ -823,7 +823,11 @@ async function loadSubTpl(){
 }
 async function refreshSubTpl(){
   try{
-    const j = await api('/api/sub_template/refresh',{method:'POST'});
+    // 携带页面当前表单值(后端先保存再刷新): 填好模板设置后直接点刷新即可生效
+    const j = await api('/api/sub_template/refresh',{method:'POST',body:JSON.stringify({
+      sub_convert_enabled: $('sSubConv').value==='true',
+      sub_convert_url: $('sSubUrl').value.trim()
+    })});
     renderSubTpl(j.data);
     toast(j.message||'模板已刷新', !!j.ok);
   }catch(e){ toast(e.message,false) }

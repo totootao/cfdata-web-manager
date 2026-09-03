@@ -101,7 +101,7 @@ DEFAULT_CONFIG = {
         'binary_path': '',          # 留空则自动检测
         'top_n': 20,                # 提取前 N 个节点(全局合并排序后)
         'per_source_top_n': 5,      # 每个源单独提取速度最快的前 N 个节点(输出 top_by_source.txt)
-        'source_retries': 3,        # 源获取失败自动重试次数(0 = 不重试)
+        'source_retries': 3,        # 源执行失败(退出码非 0/异常)自动重试次数(0 = 不重试; 测速未达标不重试)
         'source_retry_delay': 5,    # 重试间隔秒数
         # ---- 历史节点复测 ----
         'history_test_enabled': True,   # 把池内历史达标节点作为第一个"源"参与每轮测试
@@ -307,7 +307,9 @@ def refresh_sub_template(settings, force=False, ignore_enabled=False):
     拉取失败时沿用上次缓存(仅记录消息不中断任务); 未启用且非强制时返回 (None, 提示)。
     """
     url = (settings.get('sub_convert_url') or '').strip()
-    if not url or (not settings.get('sub_convert_enabled') and not ignore_enabled):
+    if not url:
+        return None, '订阅模板链接为空, 请先填写模板订阅链接'
+    if not settings.get('sub_convert_enabled') and not ignore_enabled:
         return None, '订阅模板转换未启用'
     with _SUB_TPL_LOCK:
         cached = None
@@ -1322,7 +1324,12 @@ class TaskRunner:
 
     # ---- 单个源测试 ----
     def _run_one_source(self, binary, src, idx, run_dir, settings, log, label):
-        """执行单个源测试; 获取失败(退出码非 0 / 无有效节点 / 异常)时自动重试"""
+        """执行单个源测试; 执行失败(退出码非 0 / 异常)时自动重试
+
+        CLI 正常完成(退出码 0 且无异常)即视为本次执行结束 —— 即使 0 个节点测速
+        达标(全部未达标)也不重新执行该源: 速度是客观测量结果, 重测只会
+        重复消耗时间与带宽, 不会让未达标节点变快; 只有真正的执行失败才重试。
+        """
         def _num(key, default, minimum):
             try:
                 v = settings.get(key)
@@ -1342,8 +1349,9 @@ class TaskRunner:
             rows, code, err = self._exec_source_once(binary, src, idx, run_dir, settings, log, label)
             if self._cancel:
                 raise _CanceledError()
-            ok = (code == 0) and len(rows) > 0 and not err
-            if ok or attempt >= total_attempts:
+            # 执行成功(退出码 0 且无异常)即完成: 测速未达标(0 个达标节点)不触发重试
+            exec_ok = (code == 0) and not err
+            if exec_ok or attempt >= total_attempts:
                 break
             log('%s 第 %d/%d 次尝试失败 (退出码 %s, 有效节点 %d 个), %.0f 秒后重试…' % (
                 label, attempt, total_attempts,
@@ -1362,6 +1370,16 @@ class TaskRunner:
             return rows, {
                 'name': src['name'], 'url': src['url'], 'ok': True,
                 'count': len(rows), 'elapsed_sec': round(elapsed, 1),
+                'exit_code': code, 'attempts': attempt,
+            }
+        if (code == 0) and not err:
+            # CLI 正常完成但 0 个节点测速达标: 不重试, 按无有效节点口径上报
+            log('%s 完成: 耗时 %.1f 秒, 尝试 %d 次, 测速全部未达标 '
+                '(0 个达到阈值, 不重试)' % (label, elapsed, attempt))
+            return rows, {
+                'name': src['name'], 'url': src['url'], 'ok': False,
+                'count': 0, 'elapsed_sec': round(elapsed, 1),
+                'error': '测速全部未达标, 无有效节点 (CLI 正常完成, 不重试)',
                 'exit_code': code, 'attempts': attempt,
             }
         # 全部尝试均失败(返回可能残留的部分结果)
@@ -2689,6 +2707,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
 
             if path == '/api/sub_template/refresh':
+                # 支持携带页面表单值: 填好模板设置后直接点刷新即可生效,
+                # 无需先点「保存设置」(收到的值先持久化, 再用最新配置刷新)
+                patch = {}
+                if 'sub_convert_url' in body:
+                    patch['sub_convert_url'] = str(body.get('sub_convert_url') or '').strip()
+                if 'sub_convert_enabled' in body:
+                    patch['sub_convert_enabled'] = bool(body.get('sub_convert_enabled'))
+                if patch:
+                    STORE.update({'settings': patch})
                 cfg = STORE.get()
                 _, msg = refresh_sub_template(cfg['settings'], force=True, ignore_enabled=True)
                 ok = os.path.isfile(SUB_TEMPLATE_PATH)
