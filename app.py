@@ -916,7 +916,10 @@ class TaskRunner:
                 elif src.get('is_official_v6'):
                     # 官方 IPv6 结果仅参与合并排序与分源 Top, 不进历史节点池
                     # (每轮都从官方地址库重新扫描, 无需池化跨轮复测)
-                    pass
+                    if not report.get('ok'):
+                        log('%s 官方 IPv6 优选未产出达标节点; 提示: 官方模式需要服务器具备'
+                            ' IPv6 出口网络 (Docker 默认桥接网络无 IPv6,'
+                            ' 需为容器启用 IPv6 或改用 host 网络后重试)' % label)
                 else:
                     api_results.append((src, rows))
                 for r in rows:
@@ -928,6 +931,14 @@ class TaskRunner:
             merged = sorted(all_rows.values(),
                             key=lambda r: (-r['speed'], r['latency_ms'], r['ipport']))
             log('全部源测试完成: 共 %d 个有效节点 (已按速度降序排列)' % len(merged))
+
+            # 全部源失败(0 节点)时判任务失败: 不写输出文件、不同步 latest(订阅保持原样),
+            # 避免一次全灭把订阅清空(qa_input 质检基准也一并保住)
+            if not merged:
+                failed = [r.get('name', '?') for r in source_reports if not r.get('ok')]
+                raise RuntimeError(
+                    '所有源测试失败, 无有效节点 (%s); latest 订阅文件保持原样未动'
+                    % ('、'.join(failed) if failed else '无源执行'))
 
             top_n = int(settings.get('top_n') or 20)
             top = merged[:top_n]
