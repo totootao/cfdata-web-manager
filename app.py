@@ -100,6 +100,10 @@ DEFAULT_CONFIG = {
         'history_pool_capacity': 250,   # 池容量上限, 超出挤出最近速度最慢的
         'history_window_runs': 5,       # 滚动窗口: 只保留最近 N 次运行出现过的节点
         'history_evict_fails': 3,       # 连续 K 次复测不达标即移出池
+        # ---- 官方 IPv6 优选 ----
+        'official_v6_enabled': False,   # 作为附加伪源扫描 Cloudflare 官方 IPv6 地址库(-mode=official -offiptype=6)
+        'official_v6_count': 20,        # -offspeedlimit 官方模式测速达标结果上限(达标即停止)
+        'official_v6_delay': 500,       # -offdelay 官方模式延迟阈值(毫秒), 超过剔除
         'speedtest_threads': 5,     # -nsbspeedtest 测速线程数
         'speed_min': 5.0,           # -nsbspeedmin 最低速度 MB/s
         'speed_limit': 9999,        # -nsbspeedlimit 测速结果上限
@@ -730,13 +734,17 @@ class TaskRunner:
 
     # ---- 触发 ----
     def start(self, trigger='manual'):
-        # 前置校验: 无已启用源且历史池不可用(关闭/为空)时直接拒绝, 不产生秒失败的运行记录
+        # 前置校验: 无已启用源、历史池不可用(关闭/为空)且官方 IPv6 优选未开启时
+        # 直接拒绝, 不产生秒失败的运行记录
         cfg = self.store.get()
+        official_v6_on = bool((cfg.get('settings') or {}).get('official_v6_enabled'))
         if not self.store.enabled_sources() and \
-                not HISTORY.build_test_source(cfg.get('settings') or {}):
+                not HISTORY.build_test_source(cfg.get('settings') or {}) and \
+                not official_v6_on:
             reason = ('历史节点复测已关闭' if not (cfg.get('settings') or {})
                       .get('history_test_enabled', True) else '历史节点池为空')
-            return False, '没有已启用的 API 源, 请先在「API 源管理」中添加 (%s)' % reason
+            return False, ('没有已启用的 API 源, 请先在「API 源管理」中添加'
+                           ' (或开启官方 IPv6 优选; %s)' % reason)
         with self._lock:
             if self._running:
                 if self.state.get('kind') == 'qa':
@@ -838,8 +846,14 @@ class TaskRunner:
             sources = self.store.enabled_sources()
             # 历史节点伪源: 池非空且开关开启时, 作为第一个"源"参与本轮测试
             history_src = HISTORY.build_test_source(settings)
-            if not sources and not history_src:
-                raise RuntimeError('没有已启用的 API 源, 请先在「API 源管理」中添加')
+            # 官方 IPv6 伪源: 开关开启时附加官方模式(-mode=official -offiptype=6)子任务,
+            # 扫描 Cloudflare 官方 IPv6 地址库, 结果与 API 源合并排名
+            official_v6_src = None
+            if settings.get('official_v6_enabled'):
+                official_v6_src = {'name': '官方IPv6优选', 'url': 'official://ipv6', 'is_official_v6': True}
+            if not sources and not history_src and not official_v6_src:
+                raise RuntimeError('没有已启用的 API 源, 请先在「API 源管理」中添加'
+                                   ' (或开启官方 IPv6 优选)')
             binary = self.locate_binary()
             if not binary:
                 raise RuntimeError('未找到 cfdata 可执行文件, 请在「参数设置」中配置二进制路径')
@@ -869,8 +883,17 @@ class TaskRunner:
             else:
                 log('历史节点复测: 跳过 (%s)' % (
                     '已关闭' if not settings.get('history_test_enabled', True) else '节点池为空'))
+            if official_v6_src:
+                log('官方 IPv6 优选: 已启用, 将扫描 Cloudflare 官方 IPv6 地址库'
+                    ' (-mode=official -offiptype=6, 延迟阈值 %dms, 达标上限 %d), 结果与 API 源合并排名'
+                    % (settings.get('official_v6_delay', 500),
+                       max(1, int(settings.get('official_v6_count') or 20))))
+            else:
+                log('官方 IPv6 优选: 跳过 (未开启)')
 
-            test_list = ([history_src] if history_src else []) + sources
+            test_list = (([history_src] if history_src else [])
+                         + ([official_v6_src] if official_v6_src else [])
+                         + sources)
             self._set(phase='running', progress_total=len(test_list), progress_done=0)
 
             all_rows = {}
@@ -890,6 +913,10 @@ class TaskRunner:
                 source_rows.append(rows)
                 if src.get('is_history'):
                     history_rows, history_ok = rows, bool(report.get('ok'))
+                elif src.get('is_official_v6'):
+                    # 官方 IPv6 结果仅参与合并排序与分源 Top, 不进历史节点池
+                    # (每轮都从官方地址库重新扫描, 无需池化跨轮复测)
+                    pass
                 else:
                     api_results.append((src, rows))
                 for r in rows:
@@ -1078,6 +1105,42 @@ class TaskRunner:
             cmd.insert(3, '-nsbsourceurl=' + source_url)
         return cmd
 
+    def _build_official_cmd(self, binary, settings, out_name):
+        """构造官方优选 IPv6 命令 (-mode=official -offiptype=6)
+
+        官方模式扫描 CLI 内置的 Cloudflare 官方 IPv6 地址库(约 633 条), 按延迟阈值筛选后
+        测速, 结果同样导出为 CSV 且字段列与非标模式一致(-fields 共用导出器)。
+        输出文件用 -offout 指定(官方模式专用参数, 非通用 -out)。
+        """
+        try:
+            speed_min = float(settings.get('speed_min') or 0)
+        except (TypeError, ValueError):
+            speed_min = 0.0
+        try:
+            count = max(1, int(settings.get('official_v6_count') or 20))
+        except (TypeError, ValueError):
+            count = 20
+        try:
+            delay = max(1, int(settings.get('official_v6_delay') or 500))
+        except (TypeError, ValueError):
+            delay = 500
+        return [
+            binary,
+            '-cli=true',
+            '-mode=official',
+            '-offiptype=6',
+            '-offout=%s' % out_name,
+            '-offthreads=%d' % int(settings.get('threads') or 100),
+            '-offport=443',
+            '-offdelay=%d' % delay,
+            '-offspeedmin=%s' % speed_min,
+            '-offspeedlimit=%d' % count,
+            '-format=csv',
+            '-fields=%s' % CSV_FIELDS,
+            '-nocolor=true',
+            '-config=%s' % CFDATA_CONFIG_PATH,
+        ]
+
     def _exec_cmd(self, cmd, work_dir, out_path, settings, log, label):
         """在工作目录执行一次 cfdata 命令(流式读日志/超时/取消), 返回 (rows, exit_code, error)"""
         proc = None
@@ -1150,12 +1213,18 @@ class TaskRunner:
     def _exec_source_once(self, binary, src, idx, run_dir, settings, log, label):
         """执行一次 cfdata 测试, 返回 (rows, exit_code, error)
 
-        普通源走 -nsbsourceurl 网络拉取; 历史伪源把池内节点导出为本地文件走 -nsbfile。
+        普通源走 -nsbsourceurl 网络拉取; 历史伪源把池内节点导出为本地文件走 -nsbfile;
+        官方 IPv6 伪源走官方模式(-mode=official -offiptype=6)扫描内置官方地址库。
         """
         out_name = 'source_%02d.csv' % (idx + 1)
         out_path = os.path.join(run_dir, out_name)
         if os.path.exists(out_path):
             os.remove(out_path)  # 清理上次尝试的残留, 避免误读旧结果
+        if src.get('is_official_v6'):
+            # 官方 IPv6 伪源: 无需输入, 输出经 -offout 写入标准分源文件名
+            cmd = self._build_official_cmd(binary, settings, out_name)
+            log('%s 开始测试: Cloudflare 官方 IPv6 地址库 (-mode=official -offiptype=6, 端口 443)' % label)
+            return self._exec_cmd(cmd, run_dir, out_path, settings, log, label)
         if src.get('is_history'):
             # 历史伪源: 池内节点导出为本地 ip:port 文件, 复用同一套测速参数
             input_name = 'history_input.txt'
@@ -1233,6 +1302,8 @@ class TaskRunner:
                     if not ipport or ':' not in ipport:
                         continue
                     ip, port_s = ipport.rsplit(':', 1)
+                    if len(ip) > 2 and ip.startswith('[') and ip.endswith(']'):
+                        ip = ip[1:-1]  # 去掉 IPv6 的方括号(如 [2606:4700::1]:443), Clash server 字段用裸地址
                     speed_text = (raw.get(HEADER_SPEED) or '').strip()
                     speed = parse_speed_mb(speed_text)
                     rows.append({

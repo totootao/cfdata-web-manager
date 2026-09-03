@@ -19,6 +19,7 @@
 - **分源优选**：测速完成后每个源单独提取速度最快的前 N 个节点（默认 5，可配置），输出 `top_by_source.txt` 与对应的 Clash YAML `top_by_source.yaml`（节点名带 `[源名]` 前缀），运行详情页同步展示分源排名表格
 - **latest 固定目录**：每次任务成功后自动把最新结果同步到 `results/latest/`，路径永不变化，可直接作为订阅链接
 - **Top 节点质检**：每次对完整任务提取的原始 Top 节点全量复测（固定基准不随剔除缩小，被剔除节点速度恢复自动回归），实测不达标或未出现在结果中的节点从订阅文件剔除；支持独立 cron 高频保鲜，只重写 latest 两个 Top 文件，不触碰运行历史与历史节点池
+- **官方 IPv6 优选（可选）**：开启后每轮任务附加一个「官方IPv6优选」伪源，用 cfdata 官方模式（`-mode=official -offiptype=6`）扫描 Cloudflare 官方 IPv6 地址库（约 633 条），达标节点与 API 源结果合并排名、参与分源 Top 与质检，但**不进历史节点池**；无 API 源时也可单独跑
 - **历史记录**：每次运行保存各源测试情况、Top 节点表格、分源最快节点表格、YAML 预览，支持在线下载
 
 ## 快速开始
@@ -111,6 +112,30 @@ results/latest/
 ./cfdata-linux-amd64 -cli -mode nsb \
   -nsbfile qa_nodes.txt \
   ... # 其余参数与完整任务相同, speedmin 即剔除阈值
+```
+
+## 官方 IPv6 优选（可选）
+
+完整任务默认只测 API 源（及其池化的历史节点）。开启本功能后，每轮任务额外附加一个**「官方IPv6优选」伪源**：用 cfdata 官方模式（`-mode=official -offiptype=6`）直接扫描 CLI 内置的 **Cloudflare 官方 IPv6 地址库**（约 633 条），按延迟阈值筛选后测速，与 API 源结果**合并降序排名**。
+
+- **开关位置**：「参数设置」页「官方 IPv6 优选」卡片，默认关闭；关闭时整体逻辑与原来完全一致
+- **参数**：
+  - 达标结果上限（`-offspeedlimit`，默认 20）：测速达标达到该数量即停止
+  - 延迟阈值 ms（`-offdelay`，默认 500）：延迟超过该值的节点剔除
+  - 测速下限复用全局「最低速度」（`-nsbspeedmin` → `-offspeedmin`），线程数复用全局测速线程数
+- **融入位置**：官方 v6 结果与 API 源、历史池一样参与合并排序、全局 Top 提取、分源 Top（`top_by_source` 会多一个「官方IPv6优选」段）、latest 同步与 Top 节点质检（v6 节点照常被复测保鲜）
+- **不进历史池**：官方地址库每轮都从头扫描（地址库本身就是"池"），达标 v6 节点**不写入** `history_nodes.json`，不影响历史池的归属/淘汰/容量统计
+- **IPv6 格式约定**：`top_nodes.txt` 与 `qa_input.txt` 中保留方括号 `ipport`（如 `[2606:4700:1111::1]:443`，与 CLI 导出一致，可直接回传 `-nsbfile` 复测）；`top_nodes.yaml` 的 Clash `server` 字段为裸地址（去方括号）
+- **无 API 源兜底**：API 源全部删除且历史池为空时，仅开启官方 IPv6 优选也能正常出结果（错误提示同步引导开启）
+- **前提**：运行本服务的机器需要具备 IPv6 出口网络，否则官方模式测不出达标节点
+
+等价命令：
+
+```bash
+./cfdata-linux-amd64 -cli -mode=official -offiptype=6 \
+  -offout official.csv -offthreads 100 -offport 443 \
+  -offdelay 500 -offspeedmin 5 -offspeedlimit 20 \
+  -format=csv -fields=ipport,latency,speed,dc,loc,region,city
 ```
 
 ## 目录结构

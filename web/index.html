@@ -341,6 +341,19 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       </div>
     </div>
     <div class="card">
+      <h2>官方 IPv6 优选</h2>
+      <div class="desc">开启后每轮任务附加一个「官方IPv6优选」伪源：用 cfdata 官方模式（-mode=official -offiptype=6）扫描 Cloudflare 官方 IPv6 地址库（约 633 条），达标节点与 API 源结果合并排名，同样参与 Top 提取与质检保鲜；测速下限复用「最低速度」；需要客户端具备 IPv6 网络</div>
+      <div class="grid g3">
+        <div class="field"><label>启用官方 IPv6 优选</label>
+          <select id="sOffV6"><option value="false">否（默认）</option><option value="true">是</option></select>
+          <div class="hint">默认关闭；开启后不影响 API 源与历史池逻辑（官方 v6 节点不进历史池）</div></div>
+        <div class="field"><label>达标结果上限 (-offspeedlimit)</label><input type="number" id="sOffV6Count" min="1" step="1">
+          <div class="hint">测速达标达到该数量即停止，默认 20</div></div>
+        <div class="field"><label>延迟阈值 ms (-offdelay)</label><input type="number" id="sOffV6Delay" min="1" step="1">
+          <div class="hint">延迟超过该值的节点剔除，默认 500</div></div>
+      </div>
+    </div>
+    <div class="card">
       <h2>节点模板（Clash YAML 格式化）</h2>
       <div class="desc">测试完成后的 Top 节点将按此模板生成 trojan 节点配置，格式与附件示例一致</div>
       <div class="grid g3">
@@ -725,6 +738,9 @@ async function loadSettings(){
     $('sHistCap').value=s.history_pool_capacity??250;
     $('sHistWindow').value=s.history_window_runs??5;
     $('sHistEvict').value=s.history_evict_fails??3;
+    $('sOffV6').value=String(!!s.official_v6_enabled);
+    $('sOffV6Count').value=s.official_v6_count??20;
+    $('sOffV6Delay').value=s.official_v6_delay??500;
     $('nTemplate').value=n.name_template; $('nPassword').value=n.password;
     $('nSni').value=n.sni; $('nHost').value=n.host; $('nPath').value=n.path;
     $('nFp').value=n.client_fingerprint||'chrome'; $('nSkip').value=String(!!n.skip_cert_verify);
@@ -749,6 +765,9 @@ async function saveSettings(){
     history_pool_capacity:Math.max(1, +$('sHistCap').value||250),
     history_window_runs:Math.max(1, +$('sHistWindow').value||5),
     history_evict_fails:Math.max(1, +$('sHistEvict').value||3),
+    official_v6_enabled:$('sOffV6').value==='true',
+    official_v6_count:Math.max(1, +$('sOffV6Count').value||20),
+    official_v6_delay:Math.max(1, +$('sOffV6Delay').value||500),
     node:{
       name_template:$('nTemplate').value.trim(), password:$('nPassword').value,
       sni:$('nSni').value.trim(), host:$('nHost').value.trim(), path:$('nPath').value,
