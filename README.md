@@ -11,16 +11,16 @@
 - **手动触发**：一键运行/取消，实时日志流（扫描进度、测速结果、Top 排名），防重复运行
 - **失败自动重试**：API 源获取/测试失败（退出码非 0 或无有效节点）时自动重试，默认重试 3 次、间隔 5 秒（均可配置）；日志记录每次尝试，详情页展示尝试次数与失败原因
 - **历史节点复测**：每轮测速的达标节点自动入池（记录原始来源，归属固化），下轮作为第一个"源"与各 API 源一起复测、合并排名；连续 K 次不达标自动淘汰、超出滚动窗口自动过期、容量上限挤出最慢节点；API 源全部失效时池内节点仍可兜底出结果
-- **自动排序提取**：所有源测完后按下载速度降序合并去重，提取前 N 个（默认 20）节点
-- **双格式输出**：
-  - `top_nodes.txt`：`ip:port#速度-数据中心-位置`（纯数据行，无注释）
-  - `top_nodes.yaml`：Clash trojan 节点（password/sni/ws-opts 可在界面配置）
-  - 附带 `all_sorted.txt` 全量排序结果
+- **自动排序提取**：所有源测完后按下载速度降序合并去重，**IPv4 与 IPv6 按地址族分开各自提取**前 N 个（默认 20）节点，互不挤占名额
+- **双格式输出（双栈分开）**：
+  - `top_nodes.txt` / `top_nodes.yaml` / `all_sorted.txt`：仅 IPv4 节点
+  - `top_nodes_v6.txt` / `top_nodes_v6.yaml` / `all_sorted_v6.txt`：仅 IPv6 节点（官方优选等）
+  - TXT 格式为 `ip:port#速度-数据中心-位置`（纯数据行，无注释）；YAML 为 Clash trojan 节点（password/sni/ws-opts 可在界面配置）
 - **分源优选**：测速完成后每个源单独提取速度最快的前 N 个节点（默认 5，可配置），输出 `top_by_source.txt` 与对应的 Clash YAML `top_by_source.yaml`（节点名带 `[源名]` 前缀），运行详情页同步展示分源排名表格
-- **latest 固定目录**：每次任务成功后自动把最新结果同步到 `results/latest/`，路径永不变化，可直接作为订阅链接
-- **Top 节点质检**：每次对完整任务提取的原始 Top 节点全量复测（固定基准不随剔除缩小，被剔除节点速度恢复自动回归），实测不达标或未出现在结果中的节点从订阅文件剔除；支持独立 cron 高频保鲜，只重写 latest 两个 Top 文件，不触碰运行历史与历史节点池
-- **官方 IPv6 优选（可选）**：开启后每轮任务附加一个「官方IPv6优选」伪源，用 cfdata 官方模式（`-mode=official -offiptype=6`）扫描 Cloudflare 官方 IPv6 地址库（约 633 条），达标节点与 API 源结果合并排名、参与分源 Top 与质检，但**不进历史节点池**；无 API 源时也可单独跑
-- **历史记录**：每次运行保存各源测试情况、Top 节点表格、分源最快节点表格、YAML 预览，支持在线下载
+- **latest 固定目录**：每次任务成功后自动把最新结果同步到 `results/latest/`，路径永不变化，可直接作为订阅链接（v4 / v6 分开订阅）
+- **Top 节点质检**：每次对完整任务提取的原始 Top 节点（v4 + v6 双栈）全量复测（固定基准不随剔除缩小，被剔除节点速度恢复自动回归），实测不达标或未出现在结果中的节点分别从对应栈的订阅文件剔除；支持独立 cron 高频保鲜，只重写 latest 两套 Top 文件，不触碰运行历史与历史节点池
+- **官方 IPv6 优选（可选）**：开启后每轮任务附加一个「官方IPv6优选」伪源，用 cfdata 官方模式（`-mode=official -offiptype=6`）扫描 Cloudflare 官方 IPv6 地址库（约 633 条），达标节点进入 IPv6 侧独立提取输出（`top_nodes_v6.*`）、参与分源 Top 与质检，但**不进历史节点池**；无 API 源时也可单独跑
+- **历史记录**：每次运行保存各源测试情况、Top 节点表格（v4/v6 分表）、分源最快节点表格、YAML 预览（v4/v6 双份），支持在线下载
 
 ## 快速开始
 
@@ -52,27 +52,34 @@ python3 app.py --port 8088
 
 ### latest 固定目录（订阅用法）
 
-每次任务成功后，最新结果会自动同步覆盖到固定目录 `results/latest/`：
+每次任务成功后，最新结果会自动同步覆盖到固定目录 `results/latest/`（**IPv4 与 IPv6 分开输出**）：
 
 ```
 results/latest/
-├── top_nodes.txt       # Top 节点 TXT 格式
-├── top_nodes.yaml      # Top 节点 Clash YAML 格式
-├── all_sorted.txt      # 全量排序结果
-├── top_by_source.txt   # 分源最快节点（每源前 N 个）
+├── top_nodes.txt       # Top 节点 TXT 格式（仅 IPv4）
+├── top_nodes.yaml      # Top 节点 Clash YAML 格式（仅 IPv4）
+├── all_sorted.txt      # 全量排序结果（仅 IPv4）
+├── top_nodes_v6.txt    # Top 节点 TXT 格式（仅 IPv6，官方优选等）
+├── top_nodes_v6.yaml   # Top 节点 Clash YAML 格式（仅 IPv6）
+├── all_sorted_v6.txt   # 全量排序结果（仅 IPv6）
+├── top_by_source.txt   # 分源最快节点（每源前 N 个，按源分段）
 ├── top_by_source.yaml  # 分源最快节点 Clash YAML
-└── meta.json           # 元信息（来源运行 ID / 完成时间 / 节点数）
+├── qa_input.txt        # 质检基准（v4 + v6 双栈合并的原始 Top 列表）
+└── meta.json           # 元信息（来源运行 ID / 完成时间 / v4/v6 节点数）
 ```
 
 对应固定下载地址（路径不变，内容随每次任务自动更新）：
 
-- `http://服务器IP:8088/api/download/latest/top_nodes.yaml` — 可直接填入 Clash 等客户端作为订阅链接
+- `http://服务器IP:8088/api/download/latest/top_nodes.yaml` — IPv4 订阅，可直接填入 Clash 等客户端
 - `http://服务器IP:8088/api/download/latest/top_nodes.txt`
 - `http://服务器IP:8088/api/download/latest/all_sorted.txt`
+- `http://服务器IP:8088/api/download/latest/top_nodes_v6.yaml` — IPv6 订阅（需客户端具备 IPv6 网络）
+- `http://服务器IP:8088/api/download/latest/top_nodes_v6.txt`
+- `http://服务器IP:8088/api/download/latest/all_sorted_v6.txt`
 - `http://服务器IP:8088/api/download/latest/top_by_source.txt`
 - `http://服务器IP:8088/api/download/latest/top_by_source.yaml`
 
-「运行结果」页顶部的「最新结果」卡片提供一键下载与复制订阅链接。
+「运行结果」页顶部的「最新结果」卡片提供一键下载与复制订阅链接（v4 / v6 分开复制）。
 
 ## 历史节点复测
 
@@ -98,9 +105,10 @@ results/latest/
 
 - **触发方式**：「运行结果」页点「🔍 质检 Top 节点」手动触发，或在「Top 节点质检定时」卡片配置独立 cron（与主任务定时互不影响，如 `*/30 * * * *` 每 30 分钟一次）
 - **固定基准**：每次质检都从 `latest/qa_input.txt`（完整任务提取的**原始 Top 节点**，如 20 个）全量复测，不随剔除缩小 —— 上次被剔除的节点速度恢复达标后**自动回归**订阅文件；该基准在每次完整任务成功后随 latest 一起刷新
-- **剔除规则**：cfdata 的结果文件只包含**达标节点**（`-nsbspeedmin` 由 CLI 自行过滤），因此——出现在结果中的节点即本次实测达标，保留；复测速度低于「最低速度」（复用参数设置 `speed_min`）或**未出现在结果文件中**的节点（本次测速未达标/失联）一并从 `top_nodes.txt` / `top_nodes.yaml` 剔除；被剔除节点仍留在基准中，下次质检达标自动回归
+- **剔除规则**：cfdata 的结果文件只包含**达标节点**（`-nsbspeedmin` 由 CLI 自行过滤），因此——出现在结果中的节点即本次实测达标，保留；复测速度低于「最低速度」（复用参数设置 `speed_min`）或**未出现在结果文件中**的节点（本次测速未达标/失联）一并剔除；被剔除节点仍留在基准中，下次质检达标自动回归
+- **双栈剔除**：IPv4 节点从 `top_nodes.txt` / `top_nodes.yaml` 剔除，IPv6 节点从 `top_nodes_v6.txt` / `top_nodes_v6.yaml` 剔除（两套文件都保鲜）
 - **速度刷新**：保留节点的注释速度/节点名同步刷新为本次实测值，按速度降序重排
-- **影响范围**：只重写 latest 的两个 Top 文件并在 `meta.json` 追加 `qa` 信息；`qa_input.txt` 基准、`all_sorted.txt`、分源文件、`runs.json` 运行历史、历史节点池全部不动，主任务的合并/排序/提取逻辑不受影响
+- **影响范围**：只重写 latest 的两套 Top 文件（v4 + v6）并在 `meta.json` 追加 `qa` 信息（含 `kept_v4`/`kept_v6` 双栈计数）；`qa_input.txt` 基准、`all_sorted*.txt`、分源文件、`runs.json` 运行历史、历史节点池全部不动，主任务的合并/排序/提取逻辑不受影响
 - **工作目录**：固定 `results/qa/` 只保留最近一次质检的日志/输入导出/实测结果（每次覆盖，旧版本时间戳目录 `qa_*` 首次质检时自动清理）
 - **互斥保护**：与主任务共用执行锁，一方运行中另一方触发被拒绝；质检失败或取消时 latest 保持原样
 - **记录留痕**：每次质检（成功/失败/取消）记入 `data/qa_runs.json`（保留最近 50 条），界面展示检查/保留/剔除/回归统计与被剔除、回归节点明细
@@ -116,19 +124,20 @@ results/latest/
 
 ## 官方 IPv6 优选（可选）
 
-完整任务默认只测 API 源（及其池化的历史节点）。开启本功能后，每轮任务额外附加一个**「官方IPv6优选」伪源**：用 cfdata 官方模式（`-mode=official -offiptype=6`）直接扫描 CLI 内置的 **Cloudflare 官方 IPv6 地址库**（约 633 条），按延迟阈值筛选后测速，与 API 源结果**合并降序排名**。
+完整任务默认只测 API 源（及其池化的历史节点）。开启本功能后，每轮任务额外附加一个**「官方IPv6优选」伪源**：用 cfdata 官方模式（`-mode=official -offiptype=6`）直接扫描 CLI 内置的 **Cloudflare 官方 IPv6 地址库**（约 633 条），按延迟阈值筛选后测速，结果**与 IPv4 分开提取与输出**。
 
 - **开关位置**：「参数设置」页「官方 IPv6 优选」卡片，默认关闭；关闭时整体逻辑与原来完全一致
 - **参数**：
   - 达标结果上限（`-offspeedlimit`，默认 20）：测速达标达到该数量即停止
   - 延迟阈值 ms（`-offdelay`，默认 500）：延迟超过该值的节点剔除
   - 测速下限复用全局「最低速度」（`-nsbspeedmin` → `-offspeedmin`），线程数复用全局测速线程数
-- **融入位置**：官方 v6 结果与 API 源、历史池一样参与合并排序、全局 Top 提取、分源 Top（`top_by_source` 会多一个「官方IPv6优选」段）、latest 同步与 Top 节点质检（v6 节点照常被复测保鲜）
+- **双栈分开**：所有测速结果（不区分来源）按地址族拆分——IPv4 各取速度最快的前 N 个写入 `top_nodes.txt` / `top_nodes.yaml` / `all_sorted.txt`，IPv6 各取前 N 个写入 `top_nodes_v6.txt` / `top_nodes_v6.yaml` / `all_sorted_v6.txt`，**互不挤占 Top 名额**，订阅可按栈分开使用；分源 Top（`top_by_source`）仍按源分段（官方 v6 段天然是纯 IPv6）
+- **质检保鲜**：v6 节点与 v4 一起进入质检基准（`qa_input.txt`），照常被复测剔除/回归（写入 v6 自己的文件）
 - **不进历史池**：官方地址库每轮都从头扫描（地址库本身就是"池"），达标 v6 节点**不写入** `history_nodes.json`，不影响历史池的归属/淘汰/容量统计
-- **IPv6 格式约定**：`top_nodes.txt` 与 `qa_input.txt` 中保留方括号 `ipport`（如 `[2606:4700:1111::1]:443`，与 CLI 导出一致，可直接回传 `-nsbfile` 复测）；`top_nodes.yaml` 的 Clash `server` 字段为裸地址（去方括号）
+- **IPv6 格式约定**：`top_nodes_v6.txt` 与 `qa_input.txt` 中保留方括号 `ipport`（如 `[2606:4700:1111::1]:443`，与 CLI 导出一致，可直接回传 `-nsbfile` 复测）；`top_nodes_v6.yaml` 的 Clash `server` 字段为裸地址（去方括号）
 - **无 API 源兜底**：API 源全部删除且历史池为空时，仅开启官方 IPv6 优选也能正常出结果（错误提示同步引导开启）
 - **前提**：运行本服务的机器需要具备 IPv6 出口网络，否则官方模式测不出达标节点。**Docker 部署注意**：默认桥接网络没有 IPv6（宿主机有也不行），需为容器启用 IPv6（如 `docker network create --ipv6` 自建网络）或改用 `--network host`；官方源 0 节点时日志会输出该诊断提示
-- **全灭保护**：所有源（API 源 + 历史池 + 官方 v6）本轮均无有效节点时，任务直接判失败并提示「latest 订阅文件保持原样未动」——不会用空结果覆盖 `results/latest/` 的订阅文件与质检基准
+- **全灭保护**：所有源（API 源 + 历史池 + 官方 v6）本轮均无有效节点时，任务直接判失败并提示「latest 订阅文件保持原样未动」——不会用空结果覆盖 `results/latest/` 的两套订阅文件与质检基准
 
 等价命令：
 

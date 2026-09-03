@@ -264,7 +264,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     </div>
     <div class="card">
       <h2>Top 节点质检定时</h2>
-      <div class="desc">到点后对完整任务提取的<b>原始 Top 节点</b>全量复测（latest/qa_input.txt 基准，-nsbfile 本地复测，秒级完成，不随剔除缩小），实测低于速度阈值（复用参数设置的最低速度）或未出现在结果中的节点从 top_nodes.txt/.yaml 剔除，速度恢复的节点自动回归；适合在两次完整任务之间高频保鲜订阅列表</div>
+      <div class="desc">到点后对完整任务提取的<b>原始 Top 节点</b>（IPv4 + IPv6 双栈）全量复测（latest/qa_input.txt 基准，-nsbfile 本地复测，秒级完成，不随剔除缩小），实测低于速度阈值（复用参数设置的最低速度）或未出现在结果中的节点分别从 top_nodes.txt/.yaml（IPv4）与 top_nodes_v6.txt/.yaml（IPv6）剔除，速度恢复的节点自动回归；适合在两次完整任务之间高频保鲜订阅列表</div>
       <div class="row" style="margin-bottom:16px">
         <label class="switch"><input type="checkbox" id="qaCronEnabled"><span class="slider"></span></label>
         <span style="font-weight:600" id="qaCronEnabledText">未启用</span>
@@ -342,7 +342,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     </div>
     <div class="card">
       <h2>官方 IPv6 优选</h2>
-      <div class="desc">开启后每轮任务附加一个「官方IPv6优选」伪源：用 cfdata 官方模式（-mode=official -offiptype=6）扫描 Cloudflare 官方 IPv6 地址库（约 633 条），达标节点与 API 源结果合并排名，同样参与 Top 提取与质检保鲜；测速下限复用「最低速度」；需要客户端具备 IPv6 网络</div>
+      <div class="desc">开启后每轮任务附加一个「官方IPv6优选」伪源：用 cfdata 官方模式（-mode=official -offiptype=6）扫描 Cloudflare 官方 IPv6 地址库（约 633 条），达标节点<b>与 IPv4 结果分开提取与输出</b>（top_nodes_v6.txt / .yaml，互不挤占 Top 名额），同样参与分源 Top 与质检保鲜；测速下限复用「最低速度」；需要客户端具备 IPv6 网络</div>
       <div class="grid g3">
         <div class="field"><label>启用官方 IPv6 优选</label>
           <select id="sOffV6"><option value="false">否（默认）</option><option value="true">是</option></select>
@@ -386,7 +386,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <div class="desc">最新一次成功任务的结果固定保存于 <b>results/latest/</b>，路径永不变化，可直接用于订阅</div>
       <div class="row" style="margin:14px 0 10px">
         <button class="btn-primary" id="btnQa" onclick="triggerQa()">🔍 质检 Top 节点</button>
-        <span class="hint" style="align-self:center">每次对完整任务提取的原始 Top 节点全量复测（不随剔除缩小），实测不达标或未出现在结果中的节点从 top_nodes.txt/.yaml 剔除，速度恢复自动回归（不产生新运行记录，不动历史池）</span>
+        <span class="hint" style="align-self:center">每次对完整任务提取的原始 Top 节点（v4 + v6）全量复测（不随剔除缩小），实测不达标或未出现在结果中的节点分别从 top_nodes.txt/.yaml 与 top_nodes_v6.txt/.yaml 剔除，速度恢复自动回归（不产生新运行记录，不动历史池）</span>
       </div>
       <div id="latestBox"><div class="empty">暂无最新结果，请先运行任务</div></div>
     </div>
@@ -792,6 +792,8 @@ async function loadLatest(){
     const tr = d.trigger==='cron'?'定时':'手动';
     const subYaml = location.origin+'/api/download/latest/top_nodes.yaml';
     const subTxt  = location.origin+'/api/download/latest/top_nodes.txt';
+    const subV6Y  = location.origin+'/api/download/latest/top_nodes_v6.yaml';
+    const subV6T  = location.origin+'/api/download/latest/top_nodes_v6.txt';
     const subByY  = location.origin+'/api/download/latest/top_by_source.yaml';
     const ex = d.exists||{};
     box.innerHTML = `
@@ -805,20 +807,28 @@ async function loadLatest(){
         </div>
         <div class="meta" style="margin-top:6px">
           <span>源结果总数: <b style="color:var(--text)">${d.total_nodes??'-'}</b></span>
-          <span>提取节点: <b style="color:var(--cyan)">${d.top_count??'-'}</b></span>
+          <span>提取 IPv4: <b style="color:var(--cyan)">${d.top_count??'-'}</b></span>
+          <span>提取 IPv6: <b style="color:var(--accent)">${d.top_v6_count??'-'}</b></span>
         </div>
         <div class="meta" style="margin-top:6px">
-          ${ex.txt?`<a class="dl" href="/api/download/latest/top_nodes.txt">⬇ TXT</a>`:''}
-          ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML</a>`:''}
-          ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量</a>`:''}
+          ${ex.txt?`<a class="dl" href="/api/download/latest/top_nodes.txt">⬇ TXT(v4)</a>`:''}
+          ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML(v4)</a>`:''}
+          ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量(v4)</a>`:''}
+          ${ex.v6_txt?`<a class="dl" href="/api/download/latest/top_nodes_v6.txt">⬇ TXT(v6)</a>`:''}
+          ${ex.v6_yaml?`<a class="dl" href="/api/download/latest/top_nodes_v6.yaml">⬇ YAML(v6)</a>`:''}
+          ${ex.v6_all?`<a class="dl" href="/api/download/latest/all_sorted_v6.txt">⬇ 全量(v6)</a>`:''}
           ${ex.by_source?`<a class="dl" href="/api/download/latest/top_by_source.txt">⬇ 分源Top${d.per_source_count??5}</a>`:''}
           ${ex.by_source_yaml?`<a class="dl" href="/api/download/latest/top_by_source.yaml">⬇ 分源YAML</a>`:''}
-          ${ex.yaml?`<a class="dl" onclick="copyText('${subYaml}','订阅链接')">📋 复制订阅链接</a>`:''}
+        </div>
+        <div class="meta" style="margin-top:4px">
+          ${ex.yaml?`<a class="dl" onclick="copyText('${subYaml}','IPv4 订阅链接')">📋 复制 v4 订阅</a>`:''}
+          ${ex.v6_yaml?`<a class="dl" onclick="copyText('${subV6Y}','IPv6 订阅链接')">📋 复制 v6 订阅</a>`:''}
           ${ex.by_source_yaml?`<a class="dl" onclick="copyText('${subByY}','分源订阅链接')">📋 复制分源订阅</a>`:''}
-          ${ex.txt?`<a class="dl" onclick="copyText('${subTxt}','TXT 链接')">📋 复制 TXT 链接</a>`:''}
+          ${ex.txt?`<a class="dl" onclick="copyText('${subTxt}','TXT 链接')">📋 复制 v4 TXT 链接</a>`:''}
+          ${ex.v6_txt?`<a class="dl" onclick="copyText('${subV6T}','v6 TXT 链接')">📋 复制 v6 TXT 链接</a>`:''}
         </div>
         <div class="meta" style="margin-top:4px;font-size:11px;color:var(--dim)">
-          固定路径: results/latest/（${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt ':''}${ex.by_source?'top_by_source.txt ':''}${ex.by_source_yaml?'top_by_source.yaml':''}）
+          固定路径: results/latest/（v4: ${ex.txt?'top_nodes.txt ':''}${ex.yaml?'top_nodes.yaml ':''}${ex.all?'all_sorted.txt ':''}；v6: ${ex.v6_txt?'top_nodes_v6.txt ':''}${ex.v6_yaml?'top_nodes_v6.yaml ':''}${ex.v6_all?'all_sorted_v6.txt ':''}${ex.by_source?'top_by_source.txt ':''}${ex.by_source_yaml?'top_by_source.yaml':''}）
         </div>
       </div>`;
   }catch(e){ /* 静默, 不打断历史列表 */ }
@@ -843,10 +853,13 @@ async function loadRuns(){
         </div>
         <div class="meta" style="margin-top:6px">
           <span>源结果总数: <b style="color:var(--text)">${r.total_nodes??'-'}</b></span>
-          <span>提取节点: <b style="color:var(--cyan)">${r.top_count??'-'}</b></span>
-          ${r.files?`<a class="dl" href="/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT</a>
-          <a class="dl" href="/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML</a>
-          <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量</a>
+          <span>提取 v4: <b style="color:var(--cyan)">${r.top_count??'-'}</b></span>
+          ${(r.top_v6_count??0)>0?`<span>提取 v6: <b style="color:var(--accent)">${r.top_v6_count}</b></span>`:''}
+          ${r.files?`<a class="dl" href="/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT(v4)</a>
+          <a class="dl" href="/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML(v4)</a>
+          <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量(v4)</a>
+          ${r.files.v6_txt?`<a class="dl" href="/api/download/${r.id}/${r.files.v6_txt}" onclick="event.stopPropagation()">⬇ TXT(v6)</a>`:''}
+          ${r.files.v6_yaml?`<a class="dl" href="/api/download/${r.id}/${r.files.v6_yaml}" onclick="event.stopPropagation()">⬇ YAML(v6)</a>`:''}
           ${r.files.by_source?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source}" onclick="event.stopPropagation()">⬇ 分源</a>`:''}
           ${r.files.by_source_yaml?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source_yaml}" onclick="event.stopPropagation()">⬇ 分源YAML</a>`:''}`:''}
         </div>
@@ -873,17 +886,24 @@ async function showRun(id){
       (g.nodes||[]).map((n,i)=>`
       <tr><td>${esc(g.name)}</td><td>${i+1}</td><td><b>${esc(n.name)}</b></td><td>${esc(n.server)}:${n.port}</td>
       <td style="color:var(--ok)">${esc(n.speed)}</td><td>${esc(n.latency)}</td><td>${esc(n.dc||'-')} / ${esc(n.loc||'-')}</td></tr>`).join('')).join('');
+    const nodesV6 = (r.top_v6_nodes||[]).map(n=>`
+      <tr><td>${n.rank}</td><td><b>${esc(n.name)}</b></td><td>${esc(n.server)}:${n.port}</td>
+      <td style="color:var(--ok)">${esc(n.speed)}</td><td>${esc(n.latency)}</td><td>${esc(n.dc||'-')} / ${esc(n.loc||'-')}</td></tr>`).join('');
     $('runDetail').innerHTML = `
       <div class="section-title">各源测试情况</div>
       <div class="table-scroll"><table><thead><tr><th>源名称</th><th>API 地址</th><th>状态</th><th>节点数</th><th>尝试</th><th>耗时</th><th>失败原因</th></tr></thead>
       <tbody>${srcRows||'<tr><td colspan="7" class="empty">无</td></tr>'}</tbody></table></div>
-      <div class="section-title">Top ${r.top_count||0} 节点（按速度降序）</div>
+      <div class="section-title">Top ${r.top_count||0} 节点 · IPv4（按速度降序）</div>
       <div class="table-scroll"><table><thead><tr><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
-      <tbody>${nodes||'<tr><td colspan="6" class="empty">无节点</td></tr>'}</tbody></table></div>
+      <tbody>${nodes||'<tr><td colspan="6" class="empty">无节点</td></tr>'></tbody></table></div>
+      ${nodesV6?`<div class="section-title">Top ${r.top_v6_count||nodesV6.length} 节点 · IPv6（按速度降序，与 IPv4 分开输出）</div>
+      <div class="table-scroll"><table><thead><tr><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
+      <tbody>${nodesV6}</tbody></table></div>`:''}
       ${psRows?`<div class="section-title">各源最快 ${r.per_source_count||5} 节点（分源排序）</div>
       <div class="table-scroll"><table><thead><tr><th>源</th><th>#</th><th>节点名</th><th>地址</th><th>速度</th><th>延迟</th><th>数据中心/位置</th></tr></thead>
       <tbody>${psRows}</tbody></table></div>`:''}
-      ${r.preview&&r.preview.yaml?`<div class="section-title">Clash YAML 预览</div><pre class="code">${esc(r.preview.yaml)}</pre>`:''}`;
+      ${r.preview&&r.preview.yaml?`<div class="section-title">Clash YAML 预览（IPv4 top_nodes.yaml）</div><pre class="code">${esc(r.preview.yaml)}</pre>`:''}
+      ${r.preview&&r.preview.v6_yaml?`<div class="section-title">Clash YAML 预览（IPv6 top_nodes_v6.yaml）</div><pre class="code">${esc(r.preview.v6_yaml)}</pre>`:''}`;
     $('runDetailCard').scrollIntoView({behavior:'smooth'});
   }catch(e){ toast(e.message,false) }
 }

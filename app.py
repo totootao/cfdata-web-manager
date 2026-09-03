@@ -58,7 +58,10 @@ HISTORY_SOURCE_ID = '__history__'
 HISTORY_SOURCE_NAME = '历史节点'
 # 固定的"最新结果"目录: 每次任务成功后同步覆盖, 路径不变便于外部订阅
 LATEST_DIR = os.path.join(RESULTS_DIR, 'latest')
+# IPv4 与 IPv6 结果分开输出: 主文件(top_nodes.*)只含 IPv4,
+# IPv6(官方优选等)单独输出 top_nodes_v6.* / all_sorted_v6.txt
 LATEST_FILES = ('top_nodes.txt', 'top_nodes.yaml', 'all_sorted.txt',
+                'top_nodes_v6.txt', 'top_nodes_v6.yaml', 'all_sorted_v6.txt',
                 'top_by_source.txt', 'top_by_source.yaml')
 # 质检记录(对 latest Top 节点的复测剔除结果), 存放于数据目录以持久化
 QA_RUNS_PATH = os.path.join(DATA_DIR, 'qa_runs.json')
@@ -941,9 +944,20 @@ class TaskRunner:
                     % ('、'.join(failed) if failed else '无源执行'))
 
             top_n = int(settings.get('top_n') or 20)
-            top = merged[:top_n]
-            for i, r in enumerate(top):
+            # ---- 按地址族拆分: IPv4 与 IPv6 各自独立提取 Top(互不挤占名额) ----
+            # 判断依据是地址本身(ip 含冒号 = IPv6), 与来源无关: API 源返回的 v6 节点
+            # 同样归入 IPv6 侧, 官方优选若产出 v4 也归入 IPv4 侧
+            top_v4 = [r for r in merged if ':' not in r['ip']][:top_n]
+            top_v6 = [r for r in merged if ':' in r['ip']][:top_n]
+            top = top_v4
+            log('Top 提取: IPv4 %d 个 (共 %d 候选) / IPv6 %d 个 (共 %d 候选), 各取前 %d'
+                % (len(top_v4), sum(1 for r in merged if ':' not in r['ip']),
+                   len(top_v6), sum(1 for r in merged if ':' in r['ip']), top_n))
+            for i, r in enumerate(top_v4):
                 log('Top%-3d %s  速度=%s  延迟=%s  数据中心=%s' % (
+                    i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
+            for i, r in enumerate(top_v6):
+                log('TopV6-%-2d %s  速度=%s  延迟=%s  数据中心=%s' % (
                     i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
 
             # ---- 分源 Top N: 每个源(含历史伪源)单独提取速度最快的前 N 个 ----
@@ -959,9 +973,12 @@ class TaskRunner:
                     log('  #%-2d %s  速度=%s  延迟=%s  数据中心=%s' % (
                         i + 1, r['ipport'], r['speed_text'], r['latency'], r['dc'] or '-'))
 
-            # ---- 生成输出文件 ----
-            txt_path, yaml_path, all_path, by_source_path, by_source_yaml_path = self._write_outputs(
-                run_dir, top, merged, per_source_top, settings, log)
+            # ---- 生成输出文件(IPv4 / IPv6 分开) ----
+            paths = self._write_outputs(run_dir, top_v4, top_v6, merged,
+                                        per_source_top, settings, log)
+            txt_path, yaml_path, all_path = paths['txt'], paths['yaml'], paths['all']
+            v6_txt_path, v6_yaml_path, v6_all_path = paths['v6_txt'], paths['v6_yaml'], paths['v6_all']
+            by_source_path, by_source_yaml_path = paths['by_source'], paths['by_source_yaml']
             record = {
                 'id': run_id,
                 'trigger': trigger,
@@ -970,16 +987,21 @@ class TaskRunner:
                 'status': 'success',
                 'sources': source_reports,
                 'total_nodes': len(merged),
-                'top_count': len(top),
+                'top_count': len(top_v4),
+                'top_v6_count': len(top_v6),
                 'per_source_count': per_source_n,
                 'files': {
                     'txt': os.path.basename(txt_path),
                     'yaml': os.path.basename(yaml_path),
                     'all': os.path.basename(all_path),
+                    'v6_txt': os.path.basename(v6_txt_path),
+                    'v6_yaml': os.path.basename(v6_yaml_path),
+                    'v6_all': os.path.basename(v6_all_path),
                     'by_source': os.path.basename(by_source_path),
                     'by_source_yaml': os.path.basename(by_source_yaml_path),
                 },
-                'top_nodes': [self._node_payload(r, i, settings) for i, r in enumerate(top)],
+                'top_nodes': [self._node_payload(r, i, settings) for i, r in enumerate(top_v4)],
+                'top_v6_nodes': [self._node_payload(r, i, settings) for i, r in enumerate(top_v6)],
                 'per_source_top': [
                     {'name': g['name'],
                      'nodes': [self._node_payload(r, i, settings)
@@ -1000,13 +1022,15 @@ class TaskRunner:
                             h['evicted'], h['expired'], h['dropped']))
                 except Exception as e:
                     log('历史节点池更新失败: %s' % e)
-            log('已保存 %d 个节点到两种格式: %s / %s' % (
-                len(top), os.path.basename(txt_path), os.path.basename(yaml_path)))
+            log('已保存 IPv4 %d 个节点: %s / %s; IPv6 %d 个节点: %s / %s (双栈分开输出)' % (
+                len(top_v4), os.path.basename(txt_path), os.path.basename(yaml_path),
+                len(top_v6), os.path.basename(v6_txt_path), os.path.basename(v6_yaml_path)))
             log('已生成分源优选结果: %s / %s (每源速度最快 %d 个)' % (
                 os.path.basename(by_source_path), os.path.basename(by_source_yaml_path), per_source_n))
             log('===== 任务完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
-                      current_source='', message='成功: %d 个节点' % len(top))
+                      current_source='', message='成功: IPv4 %d 个 / IPv6 %d 个节点'
+                      % (len(top_v4), len(top_v6)))
         except _CanceledError:
             msg = '任务已取消'
             self.log.write('[%s] %s' % (now_str('%H:%M:%S'), msg))
@@ -1391,18 +1415,29 @@ class TaskRunner:
                 if os.path.isfile(src):
                     shutil.copyfile(src, os.path.join(LATEST_DIR, fname))
             # 原始 Top 节点基准: 质检每次都从这份完整列表复测, 不随剔除缩小
+            # (v4 与 v6 双栈合并, 质检时一并复测保鲜)
             src_top = os.path.join(run_dir, 'top_nodes.txt')
-            if os.path.isfile(src_top):
-                shutil.copyfile(src_top, QA_INPUT_PATH)
+            src_top_v6 = os.path.join(run_dir, 'top_nodes_v6.txt')
+            if os.path.isfile(src_top) or os.path.isfile(src_top_v6):
+                with open(QA_INPUT_PATH, 'w', encoding='utf-8') as f:
+                    for path in (src_top, src_top_v6):
+                        if not os.path.isfile(path):
+                            continue
+                        with open(path, 'r', encoding='utf-8') as sf:
+                            f.write(sf.read().rstrip('\n') + '\n')
             meta = {
                 'run_id': record.get('id'),
                 'finished_at': record.get('finished_at'),
                 'trigger': record.get('trigger'),
                 'top_count': record.get('top_count', 0),
+                'top_v6_count': record.get('top_v6_count', 0),
                 'total_nodes': record.get('total_nodes', 0),
                 'per_source_count': record.get('per_source_count', 0),
                 'files': {'txt': 'top_nodes.txt', 'yaml': 'top_nodes.yaml',
-                          'all': 'all_sorted.txt', 'by_source': 'top_by_source.txt',
+                          'all': 'all_sorted.txt',
+                          'v6_txt': 'top_nodes_v6.txt', 'v6_yaml': 'top_nodes_v6.yaml',
+                          'v6_all': 'all_sorted_v6.txt',
+                          'by_source': 'top_by_source.txt',
                           'by_source_yaml': 'top_by_source.yaml'},
             }
             tmp = os.path.join(LATEST_DIR, 'meta.json.tmp')
@@ -1410,33 +1445,52 @@ class TaskRunner:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             os.replace(tmp, os.path.join(LATEST_DIR, 'meta.json'))
             log('已同步最新结果到固定目录: results/latest/ '
-                '(top_nodes.txt / top_nodes.yaml / all_sorted.txt / '
-                'top_by_source.txt / top_by_source.yaml / qa_input.txt)')
+                '(IPv4: top_nodes.txt / top_nodes.yaml / all_sorted.txt; '
+                'IPv6: top_nodes_v6.txt / top_nodes_v6.yaml / all_sorted_v6.txt; '
+                'top_by_source.* / qa_input.txt)')
         except Exception as e:
             log('同步 latest 目录失败: %s' % e)
 
-    def _write_outputs(self, run_dir, top, merged, per_source_top, settings, log):
+    def _write_outputs(self, run_dir, top_v4, top_v6, merged, per_source_top, settings, log):
+        """生成结果文件: IPv4 与 IPv6 分开输出
+
+        IPv4: top_nodes.txt / top_nodes.yaml / all_sorted.txt(全量 v4 排序)
+        IPv6: top_nodes_v6.txt / top_nodes_v6.yaml / all_sorted_v6.txt(全量 v6 排序)
+        分源 Top 不分栈(按源分段, 官方 v6 源天然是纯 IPv6 段)。
+        """
         node_cfg = settings.get('node', {})
+        merged_v4 = [r for r in merged if ':' not in r['ip']]
+        merged_v6 = [r for r in merged if ':' in r['ip']]
 
-        # 格式 1: TXT  ip:port#速度-数据中心-位置 (纯数据行, 无注释)
+        def _write_txt(path, rows):
+            with open(path, 'w', encoding='utf-8') as f:
+                for r in rows:
+                    f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'],
+                                               r['dc'] or 'CF', r['loc'] or 'XX'))
+
+        # ---- IPv4 主输出 ----
         txt_path = os.path.join(run_dir, 'top_nodes.txt')
-        with open(txt_path, 'w', encoding='utf-8') as f:
-            for r in top:
-                f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
-
-        # 格式 2: Clash YAML (与附件格式一致)
-        used_names = set()
+        _write_txt(txt_path, top_v4)
         yaml_path = os.path.join(run_dir, 'top_nodes.yaml')
+        used_names = set()
         with open(yaml_path, 'w', encoding='utf-8') as f:
             f.write('proxies:\n')
-            for r in top:
+            for r in top_v4:
                 self._yaml_node(f, r, self._node_name(r, settings, used_names), node_cfg)
-
-        # 附加: 全量排序结果 (纯数据行, 无注释)
         all_path = os.path.join(run_dir, 'all_sorted.txt')
-        with open(all_path, 'w', encoding='utf-8') as f:
-            for r in merged:
-                f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'], r['dc'] or 'CF', r['loc'] or 'XX'))
+        _write_txt(all_path, merged_v4)
+
+        # ---- IPv6 独立输出(v4/v6 分开订阅) ----
+        v6_txt_path = os.path.join(run_dir, 'top_nodes_v6.txt')
+        _write_txt(v6_txt_path, top_v6)
+        v6_yaml_path = os.path.join(run_dir, 'top_nodes_v6.yaml')
+        used_names_v6 = set()
+        with open(v6_yaml_path, 'w', encoding='utf-8') as f:
+            f.write('proxies:\n')
+            for r in top_v6:
+                self._yaml_node(f, r, self._node_name(r, settings, used_names_v6), node_cfg)
+        v6_all_path = os.path.join(run_dir, 'all_sorted_v6.txt')
+        _write_txt(v6_all_path, merged_v6)
 
         # 附加: 分源 Top N TXT (每个源单独提取速度最快的前 N 个节点, 纯数据+分组行)
         per_source_n = max(1, int(settings.get('per_source_top_n') or 5))
@@ -1459,7 +1513,11 @@ class TaskRunner:
                     base = self._node_name(r, settings, set())
                     name = unique_name('[%s] %s' % (g['name'], base), used_by)
                     self._yaml_node(f, r, name, node_cfg)
-        return txt_path, yaml_path, all_path, by_source_path, by_source_yaml_path
+        return {
+            'txt': txt_path, 'yaml': yaml_path, 'all': all_path,
+            'v6_txt': v6_txt_path, 'v6_yaml': v6_yaml_path, 'v6_all': v6_all_path,
+            'by_source': by_source_path, 'by_source_yaml': by_source_yaml_path,
+        }
 
     # ---- 质检子任务 ----
     def _run_qa(self, trigger):
@@ -1571,13 +1629,14 @@ class TaskRunner:
             for v in revived:
                 log('回归: %s (本次 %s, 速度已恢复达标, 重新写回订阅文件)' % (v['ipport'], v['speed']))
 
-            # 只重写 latest 的 top_nodes 两个文件(分源/全量文件保留原样)
-            self._rewrite_latest_top(final_rows, settings, log)
+            # 只重写 latest 的 Top 文件(IPv4/IPv6 分开写; 分源/全量文件保留原样)
+            kept_v4_n, kept_v6_n = self._rewrite_latest_top(final_rows, settings, log)
 
             prev_meta = load_latest_meta() or {}
             info = {
                 'id': run_id, 'trigger': trigger, 'at': now_str(),
                 'checked': len(ipports), 'kept': len(kept), 'file_count': len(final_rows),
+                'kept_v4': kept_v4_n, 'kept_v6': kept_v6_n,
                 'pruned_count': len(pruned), 'revived_count': len(revived),
                 'pruned': [{'ipport': p['ipport'], 'speed': p['speed']} for p in pruned],
                 'revived': [{'ipport': v['ipport'], 'speed': v['speed']} for v in revived],
@@ -1588,19 +1647,22 @@ class TaskRunner:
             save_qa_record({'id': run_id, 'trigger': trigger, 'started_at': self.state.get('started_at'),
                             'finished_at': now_str(), 'status': 'success',
                             'checked': len(ipports), 'kept': len(kept),
+                            'kept_v4': kept_v4_n, 'kept_v6': kept_v6_n,
                             'pruned_count': len(pruned), 'revived_count': len(revived),
                             'pruned': [p['ipport'] for p in pruned],
                             'revived': [v['ipport'] for v in revived],
                             'latest_run_id': prev_meta.get('run_id', ''), 'error': ''})
-            log('质检完成: 检查 %d 个, 保留 %d 个, 剔除 %d 个(其中 %d 个未出现在结果中), 回归 %d 个 '
-                '(latest 已重写, 运行历史/历史池未动)'
-                % (len(ipports), len(kept), len(pruned), len(failed), len(revived)))
+            log('质检完成: 检查 %d 个, 保留 %d 个(IPv4 %d / IPv6 %d), 剔除 %d 个(其中 %d 个未出现在结果中), '
+                '回归 %d 个 (latest 已重写, 运行历史/历史池未动)'
+                % (len(ipports), len(kept), kept_v4_n, kept_v6_n,
+                   len(pruned), len(failed), len(revived)))
             if not final_rows:
                 log('警告: Top 节点本次全部未达标, latest 订阅内容为空, 建议尽快触发一次完整任务')
             log('===== 质检完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
-                      message='质检完成: 保留 %d / 剔除 %d / 回归 %d'
-                              % (len(final_rows), len(pruned), len(revived)))
+                      message='质检完成: 保留 %d (v4 %d / v6 %d) / 剔除 %d / 回归 %d'
+                              % (len(final_rows), kept_v4_n, kept_v6_n,
+                                 len(pruned), len(revived)))
         except _CanceledError:
             msg = '质检已取消, latest 保持原样'
             log(msg)
@@ -1625,15 +1687,21 @@ class TaskRunner:
                 self._proc = None
 
     def _rewrite_latest_top(self, kept, settings, log):
-        """用质检后的保留节点重写 results/latest/ 的 top_nodes.txt 与 top_nodes.yaml"""
+        """用质检后的保留节点重写 results/latest/ 的 Top 文件(IPv4 / IPv6 分开)
+
+        kept: 全部保留节点(混合双栈); 写入时按地址族拆分 ——
+        IPv4 → top_nodes.txt / top_nodes.yaml, IPv6 → top_nodes_v6.txt / top_nodes_v6.yaml
+        """
         node_cfg = settings.get('node', {})
-        txt_path = os.path.join(LATEST_DIR, 'top_nodes.txt')
-        yaml_path = os.path.join(LATEST_DIR, 'top_nodes.yaml')
-        try:
-            os.makedirs(LATEST_DIR, exist_ok=True)
+        kept_v4 = [r for r in kept if ':' not in r['ip']]
+        kept_v6 = [r for r in kept if ':' in r['ip']]
+
+        def _write_pair(rows, txt_name, yaml_name):
+            txt_path = os.path.join(LATEST_DIR, txt_name)
+            yaml_path = os.path.join(LATEST_DIR, yaml_name)
             tmp = txt_path + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
-                for r in kept:
+                for r in rows:
                     f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'],
                                                r['dc'] or 'CF', r['loc'] or 'XX'))
             os.replace(tmp, txt_path)
@@ -1641,10 +1709,18 @@ class TaskRunner:
             tmp = yaml_path + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write('proxies:\n')
-                for r in kept:
+                for r in rows:
                     self._yaml_node(f, r, self._node_name(r, settings, used_names), node_cfg)
             os.replace(tmp, yaml_path)
-            log('已重写 latest: top_nodes.txt / top_nodes.yaml (节点速度已刷新为本次质检实测值)')
+
+        try:
+            os.makedirs(LATEST_DIR, exist_ok=True)
+            _write_pair(kept_v4, 'top_nodes.txt', 'top_nodes.yaml')
+            _write_pair(kept_v6, 'top_nodes_v6.txt', 'top_nodes_v6.yaml')
+            log('已重写 latest: top_nodes.txt / top_nodes.yaml (IPv4 %d 个) + '
+                'top_nodes_v6.txt / top_nodes_v6.yaml (IPv6 %d 个), '
+                '节点速度已刷新为本次质检实测值' % (len(kept_v4), len(kept_v6)))
+            return len(kept_v4), len(kept_v6)
         except Exception as e:
             log('重写 latest 失败: %s' % e)
             raise
@@ -1775,8 +1851,15 @@ def _read_top_lines(path):
 
 
 def read_latest_top_lines():
-    """读取 results/latest/top_nodes.txt 的 (ip:port, 注释) 列表"""
-    return _read_top_lines(os.path.join(LATEST_DIR, 'top_nodes.txt'))
+    """读取 results/latest/top_nodes.txt(IPv4) 与 top_nodes_v6.txt(IPv6) 合并的
+    (ip:port, 注释) 列表 —— 双栈分开输出后, 订阅内容为两文件之和"""
+    out, seen = [], set()
+    for name in ('top_nodes.txt', 'top_nodes_v6.txt'):
+        for ipport, note in _read_top_lines(os.path.join(LATEST_DIR, name)):
+            if ipport not in seen:
+                seen.add(ipport)
+                out.append((ipport, note))
+    return out
 
 
 def read_latest_top_ipports():
@@ -1806,7 +1889,8 @@ def read_qa_input_lines():
 
 
 def update_latest_meta_qa(info):
-    """在 latest/meta.json 追加质检信息; top_count 同步为重写后文件中的实际节点数"""
+    """在 latest/meta.json 追加质检信息; top_count/top_v6_count 同步为重写后
+    两套文件中的实际节点数(IPv4 / IPv6 分开)"""
     meta_path = os.path.join(LATEST_DIR, 'meta.json')
     try:
         data = {}
@@ -1819,11 +1903,9 @@ def update_latest_meta_qa(info):
             except Exception:
                 data = {}
         data['qa'] = info
-        # file_count = 重写后文件中的实际节点数(本次实测达标保留的节点)
-        file_count = info.get('file_count')
-        if file_count is None:
-            file_count = info.get('kept', 0)
-        data['top_count'] = file_count if file_count is not None else data.get('top_count', 0)
+        # kept_v4/kept_v6 = 重写后两套文件中的实际节点数(本次实测达标保留)
+        data['top_count'] = info.get('kept_v4', info.get('kept', 0))
+        data['top_v6_count'] = info.get('kept_v6', 0)
         tmp = meta_path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -2115,7 +2197,7 @@ class Handler(BaseHTTPRequestHandler):
                 runs = load_runs()
                 slim = [{k: r.get(k) for k in
                          ('id', 'trigger', 'started_at', 'finished_at', 'status',
-                          'total_nodes', 'top_count', 'files')} for r in runs]
+                          'total_nodes', 'top_count', 'top_v6_count', 'files')} for r in runs]
                 self._json({'ok': True, 'data': slim})
                 return
 
@@ -2141,7 +2223,7 @@ class Handler(BaseHTTPRequestHandler):
                 run_dir = os.path.join(RESULTS_DIR, m.group(1))
                 for key, fname in (rec.get('files') or {}).items():
                     fp = os.path.join(run_dir, os.path.basename(fname))
-                    if os.path.isfile(fp) and key in ('txt', 'yaml'):
+                    if os.path.isfile(fp) and key in ('txt', 'yaml', 'v6_txt', 'v6_yaml'):
                         try:
                             with open(fp, 'r', encoding='utf-8') as f:
                                 rec.setdefault('preview', {})[key] = f.read(20000)
