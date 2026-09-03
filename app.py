@@ -188,6 +188,18 @@ def parse_latency_ms(value):
         return float('inf')
 
 
+def bracket_v6_ipport(ipport):
+    """官方扫描 CSV 的 ipport 为裸 IPv6(如 2606:4700::1:443), 写入测速输入文件前
+    规范化为方括号格式 [2606:4700::1]:443 —— cfdata 的 -nsbfile 输入解析对带
+    方括号的 IPv6 支持最完整(与平台质检/历史池导出的输入格式一致)。IPv4 原样返回。"""
+    if not ipport or ipport.startswith('[') or ipport.count(':') < 2:
+        return ipport
+    ip, _, port = ipport.rpartition(':')
+    if ip and port.isdigit():
+        return '[%s]:%s' % (ip, port)
+    return ipport
+
+
 def yaml_value(v):
     """按附件风格输出 YAML 标量: 简单值不加引号, 含特殊字符时加双引号"""
     if isinstance(v, bool):
@@ -887,8 +899,10 @@ class TaskRunner:
                 log('历史节点复测: 跳过 (%s)' % (
                     '已关闭' if not settings.get('history_test_enabled', True) else '节点池为空'))
             if official_v6_src:
-                log('官方 IPv6 优选: 已启用, 将扫描 Cloudflare 官方 IPv6 地址库'
-                    ' (-mode=official -offiptype=6, 延迟阈值 %dms, 达标上限 %d), 结果与 API 源合并排名'
+                log('官方 IPv6 优选: 已启用, 阶段1 扫描 Cloudflare 官方 IPv6 地址库'
+                    ' (-mode=official -offiptype=6, 延迟阈值 %dms, 覆盖全部机房), '
+                    '阶段2 将延迟达标节点写入临时文件按 IP 逐个测速(达标上限 %d), '
+                    '结果与 API 源合并排名'
                     % (settings.get('official_v6_delay', 500),
                        max(1, int(settings.get('official_v6_count') or 20))))
             else:
@@ -920,7 +934,8 @@ class TaskRunner:
                     # 官方 IPv6 结果仅参与合并排序与分源 Top, 不进历史节点池
                     # (每轮都从官方地址库重新扫描, 无需池化跨轮复测)
                     if not report.get('ok'):
-                        log('%s 官方 IPv6 优选未产出达标节点; 提示: 官方模式需要服务器具备'
+                        log('%s 官方 IPv6 优选未产出达标节点(延迟扫描 0 条或按 IP 测速'
+                            ' 全部未达标); 提示: 官方模式需要服务器具备'
                             ' IPv6 出口网络 (Docker 默认桥接网络无 IPv6,'
                             ' 需为容器启用 IPv6 或改用 host 网络后重试)' % label)
                 else:
@@ -1141,20 +1156,16 @@ class TaskRunner:
         return cmd
 
     def _build_official_cmd(self, binary, settings, out_name):
-        """构造官方优选 IPv6 命令 (-mode=official -offiptype=6)
+        """构造官方 IPv6 阶段1 延迟扫描命令 (-mode=official -offiptype=6)
 
-        官方模式扫描 CLI 内置的 Cloudflare 官方 IPv6 地址库(约 633 条), 按延迟阈值筛选后
-        测速, 结果同样导出为 CSV 且字段列与非标模式一致(-fields 共用导出器)。
+        官方模式原生流程是"扫描 → 选定单一机房(-offdc 不填时自动选延迟最低者)
+        → 只对该机房做详细测试与测速", 其余机房(如洛杉矶)的延迟达标节点不会
+        获得测速机会。因此这里传入必然不存在的机房代号(-offdc=NONE)并关闭官方
+        测速(-offspeedlimit=0), 使 CLI 只做延迟扫描, 把全部延迟达标节点(覆盖
+        所有机房, 含数据中心/位置信息, 无速度值)导出为 CSV; 平台随后把这些节点
+        写入临时文件, 用非标模式(-nsbfile)按 IP 逐个测速, 所有机房机会均等。
         输出文件用 -offout 指定(官方模式专用参数, 非通用 -out)。
         """
-        try:
-            speed_min = float(settings.get('speed_min') or 0)
-        except (TypeError, ValueError):
-            speed_min = 0.0
-        try:
-            count = max(1, int(settings.get('official_v6_count') or 20))
-        except (TypeError, ValueError):
-            count = 20
         try:
             delay = max(1, int(settings.get('official_v6_delay') or 500))
         except (TypeError, ValueError):
@@ -1168,8 +1179,8 @@ class TaskRunner:
             '-offthreads=%d' % int(settings.get('threads') or 100),
             '-offport=443',
             '-offdelay=%d' % delay,
-            '-offspeedmin=%s' % speed_min,
-            '-offspeedlimit=%d' % count,
+            '-offdc=NONE',
+            '-offspeedlimit=0',
             '-format=csv',
             '-fields=%s' % CSV_FIELDS,
             '-nocolor=true',
@@ -1249,16 +1260,65 @@ class TaskRunner:
         """执行一次 cfdata 测试, 返回 (rows, exit_code, error)
 
         普通源走 -nsbsourceurl 网络拉取; 历史伪源把池内节点导出为本地文件走 -nsbfile;
-        官方 IPv6 伪源走官方模式(-mode=official -offiptype=6)扫描内置官方地址库。
+        官方 IPv6 伪源分两阶段: 官方模式延迟扫描全部机房(阶段1) → 临时文件按 IP 逐个
+        测速(阶段2, -nsbfile)。
         """
         out_name = 'source_%02d.csv' % (idx + 1)
         out_path = os.path.join(run_dir, out_name)
         if os.path.exists(out_path):
             os.remove(out_path)  # 清理上次尝试的残留, 避免误读旧结果
         if src.get('is_official_v6'):
-            # 官方 IPv6 伪源: 无需输入, 输出经 -offout 写入标准分源文件名
-            cmd = self._build_official_cmd(binary, settings, out_name)
-            log('%s 开始测试: Cloudflare 官方 IPv6 地址库 (-mode=official -offiptype=6, 端口 443)' % label)
+            # 官方 IPv6 伪源分两阶段执行:
+            # 阶段1 官方模式仅做延迟扫描(-offdc=NONE 跳过单机房收敛), 导出全部
+            #      延迟达标节点(覆盖所有机房, 含数据中心/位置, 无速度值);
+            # 阶段2 把这些节点写入临时文件 official_v6_input.txt, 用非标模式
+            #      (-nsbfile)按 IP 逐个测速 —— 香港之外(洛杉矶等)的机房同样获得
+            #      测速机会, 不再被官方模式"自动选最低延迟机房"过滤掉。
+            scan_name = 'official_v6_scan.csv'
+            scan_path = os.path.join(run_dir, scan_name)
+            if os.path.exists(scan_path):
+                os.remove(scan_path)  # 清理上次尝试的残留, 避免误读旧结果
+            try:
+                delay = max(1, int(settings.get('official_v6_delay') or 500))
+            except (TypeError, ValueError):
+                delay = 500
+            scan_cmd = self._build_official_cmd(binary, settings, scan_name)
+            log('%s 开始测试: Cloudflare 官方 IPv6 地址库 阶段1 延迟扫描 '
+                '(-mode=official -offiptype=6, 延迟阈值 %dms, 覆盖全部机房, 不做官方单机房测速)'
+                % (label, delay))
+            scan_rows, code, err = self._exec_cmd(scan_cmd, run_dir, scan_path,
+                                                  settings, log, label)
+            if (code is not None and code != 0) or err:
+                return [], code, err or '官方 IPv6 阶段1 延迟扫描失败 (退出码 %s)' % code
+            if not scan_rows:
+                # 延迟扫描 0 条(无 IPv6 出口或全部超过延迟阈值): 走既有的
+                # "未产出达标节点"口径, 不进入阶段2
+                return [], 0, None
+            seen, ipports, dcs = set(), [], set()
+            for r in scan_rows:
+                ipport = bracket_v6_ipport((r.get('ipport') or '').strip())
+                if not ipport or ipport in seen:
+                    continue
+                seen.add(ipport)
+                ipports.append(ipport)
+                dc = (r.get('dc') or '').strip()
+                if dc:
+                    dcs.add(dc)
+            input_name = 'official_v6_input.txt'
+            with open(os.path.join(run_dir, input_name), 'w', encoding='utf-8') as f:
+                f.write('\n'.join(ipports) + '\n')
+            log('%s 官方 IPv6 阶段2 按IP测速: 延迟达标 %d 条(覆盖 %d 个机房: %s), '
+                '已生成临时文件 %s, 非标模式逐个测速'
+                % (label, len(ipports), len(dcs), ' / '.join(sorted(dcs)[:10]) or '未知',
+                   input_name))
+            try:
+                count = max(1, int(settings.get('official_v6_count') or 20))
+            except (TypeError, ValueError):
+                count = 20
+            nsb_settings = dict(settings)
+            nsb_settings['speed_limit'] = count  # 测速达标上限沿用官方 v6 配置
+            cmd = self._build_cmd(binary, nsb_settings, out_name, input_name=input_name)
+            cmd.insert(3, '-nsbdelay=%d' % delay)  # 阶段2 延迟复测阈值与阶段1保持一致
             return self._exec_cmd(cmd, run_dir, out_path, settings, log, label)
         if src.get('is_history'):
             # 历史伪源: 池内节点导出为本地 ip:port 文件, 复用同一套测速参数
@@ -1339,6 +1399,11 @@ class TaskRunner:
                     ip, port_s = ipport.rsplit(':', 1)
                     if len(ip) > 2 and ip.startswith('[') and ip.endswith(']'):
                         ip = ip[1:-1]  # 去掉 IPv6 的方括号(如 [2606:4700::1]:443), Clash server 字段用裸地址
+                    if ':' in ip and port_s.isdigit():
+                        # cfdata CSV 的 IPv6 ipport 为裸拼接(2606:4700::1:443), 统一
+                        # 规范化为方括号格式 [2606:4700::1]:443: txt/质检/历史池输入
+                        # 都以此为准(裸格式会让 nsb 输入解析丢失端口, 回退 443)
+                        ipport = '[%s]:%s' % (ip, port_s)
                     speed_text = (raw.get(HEADER_SPEED) or '').strip()
                     speed = parse_speed_mb(speed_text)
                     rows.append({

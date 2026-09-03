@@ -347,10 +347,10 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
         <div class="field"><label>启用官方 IPv6 优选</label>
           <select id="sOffV6"><option value="false">否（默认）</option><option value="true">是</option></select>
           <div class="hint">默认关闭；开启后不影响 API 源与历史池逻辑（官方 v6 节点不进历史池）</div></div>
-        <div class="field"><label>达标结果上限 (-offspeedlimit)</label><input type="number" id="sOffV6Count" min="1" step="1">
-          <div class="hint">测速达标达到该数量即停止，默认 20</div></div>
-        <div class="field"><label>延迟阈值 ms (-offdelay)</label><input type="number" id="sOffV6Delay" min="1" step="1">
-          <div class="hint">延迟超过该值的节点剔除，默认 500</div></div>
+        <div class="field"><label>达标结果上限 (-nsbspeedlimit)</label><input type="number" id="sOffV6Count" min="1" step="1">
+          <div class="hint">阶段2按IP逐个测速，达标达到该数量即停止，默认 20</div></div>
+        <div class="field"><label>延迟阈值 ms (-offdelay/-nsbdelay)</label><input type="number" id="sOffV6Delay" min="1" step="1">
+          <div class="hint">两个阶段共用：延迟超过该值剔除，默认 500</div></div>
       </div>
     </div>
     <div class="card">
