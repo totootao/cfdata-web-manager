@@ -109,8 +109,9 @@ HEADER_CITY = '城市'
 
 # ---------------------------------------------------------------- 节点名 中英文对照
 # cfdata 输出的 region 为 ISO-3166-1 alpha-2 国家/地区码, dc 为机场码(大写),
-# loc/city 为英文地名。节点名语言设为中文时, 按以下映射把对应字段替换为中文,
-# 未知值原样保留(避免误改用户自定义地名)。
+# loc/city 多为英文地名(如 Hong Kong), 但也可能直接是两位国家码(如 HK)。
+# 节点名语言设为中文时, 按以下映射把对应字段替换为中文, 未知值原样保留
+# (避免误改用户自定义地名)。
 REGION_ZH = {
     'HK': '香港', 'TW': '台湾', 'MO': '澳门', 'CN': '中国',
     'US': '美国', 'JP': '日本', 'SG': '新加坡', 'KR': '韩国', 'KP': '朝鲜',
@@ -226,6 +227,9 @@ def localize_node_fields(fields):
             out[k] = LOC_CITY_ZH[raw]
         elif raw.title() in REGION_NAME_ZH:
             out[k] = REGION_NAME_ZH[raw.title()]
+        elif raw.upper() in REGION_ZH:
+            # 源IP位置/城市也可能是两位国家码(如 HK/TW/SG), 同样转中文
+            out[k] = REGION_ZH[raw.upper()]
     return out
 
 

@@ -314,6 +314,24 @@ class TestNodeNameLang(unittest.TestCase):
         app.localize_node_fields(src)
         self.assertEqual(src['dc'], 'HKG')
 
+    def test_loc_two_letter_code_localized(self):
+        """源IP位置为两位国家码(HK/TW/SG)时也应转中文, 而非原样保留"""
+        for code, zh in (('HK', '香港'), ('TW', '台湾'), ('SG', '新加坡')):
+            out = app.localize_node_fields({'dc': 'HKG', 'loc': code,
+                                            'region': '', 'city': ''})
+            self.assertEqual(out['loc'], zh, code)
+
+    def test_zh_name_with_two_letter_loc(self):
+        """默认模板 {dc}-{loc}-... 在 loc 为两位码时正确出中文节点名"""
+        runner = app.TaskRunner(app.STORE)
+        settings = {'node': {'name_template': '{dc}-{loc}-{speed}MB/s',
+                             'name_lang': 'zh'}}
+        for code, zh in (('HK', '香港'), ('TW', '台湾'), ('SG', '新加坡')):
+            name = runner._node_name(self._row(loc=code, region=''),
+                                     settings, set())
+            # dc=HKG 也会本地化为「香港」, loc 两位码应本地化为对应中文
+            self.assertEqual(name, '香港-%s-42.41MB/s' % zh, name)
+
 
 class TestAuth(unittest.TestCase):
     """可选 Basic 认证: 未配置时放行, 配置后校验; 令牌仅用于下载路径"""
