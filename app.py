@@ -107,6 +107,128 @@ HEADER_LOC = '源IP位置'
 HEADER_REGION = '地区'
 HEADER_CITY = '城市'
 
+# ---------------------------------------------------------------- 节点名 中英文对照
+# cfdata 输出的 region 为 ISO-3166-1 alpha-2 国家/地区码, dc 为机场码(大写),
+# loc/city 为英文地名。节点名语言设为中文时, 按以下映射把对应字段替换为中文,
+# 未知值原样保留(避免误改用户自定义地名)。
+REGION_ZH = {
+    'HK': '香港', 'TW': '台湾', 'MO': '澳门', 'CN': '中国',
+    'US': '美国', 'JP': '日本', 'SG': '新加坡', 'KR': '韩国', 'KP': '朝鲜',
+    'GB': '英国', 'DE': '德国', 'FR': '法国', 'NL': '荷兰', 'ES': '西班牙',
+    'IT': '意大利', 'CA': '加拿大', 'AU': '澳大利亚', 'NZ': '新西兰',
+    'IN': '印度', 'BR': '巴西', 'MX': '墨西哥', 'RU': '俄罗斯', 'TR': '土耳其',
+    'SE': '瑞典', 'NO': '挪威', 'DK': '丹麦', 'FI': '芬兰', 'PL': '波兰',
+    'CH': '瑞士', 'AT': '奥地利', 'BE': '比利时', 'IE': '爱尔兰', 'PT': '葡萄牙',
+    'CZ': '捷克', 'RO': '罗马尼亚', 'GR': '希腊', 'HU': '匈牙利', 'UA': '乌克兰',
+    'AE': '阿联酋', 'SA': '沙特', 'IL': '以色列', 'ZA': '南非', 'EG': '埃及',
+    'TH': '泰国', 'VN': '越南', 'MY': '马来西亚', 'ID': '印尼', 'PH': '菲律宾',
+}
+DC_ZH = {
+    'HKG': '香港', 'TPE': '台北', 'KHH': '高雄', 'NRT': '东京', 'HND': '东京羽田',
+    'KIX': '大阪', 'NGO': '名古屋', 'FUK': '福冈', 'CTS': '札幌', 'OKA': '冲绳',
+    'ICN': '首尔', 'PUS': '釜山', 'SIN': '新加坡', 'BKK': '曼谷', 'KUL': '吉隆坡',
+    'MNL': '马尼拉', 'CGK': '雅加达', 'SGN': '胡志明', 'HAN': '河内', 'RGN': '仰光',
+    'BOM': '孟买', 'DEL': '德里', 'MAA': '金奈', 'BLR': '班加罗尔', 'CCU': '加尔各答',
+    'LAX': '洛杉矶', 'SJC': '圣何塞', 'SFO': '旧金山', 'SEA': '西雅图', 'PDX': '波特兰',
+    'SNA': '圣安娜', 'PHX': '菲尼克斯', 'LAS': '拉斯维加斯', 'SAN': '圣迭戈',
+    'ONT': '安大略', 'SMF': '萨克拉门托', 'OAK': '奥克兰', 'BOI': '博伊西',
+    'ORD': '芝加哥', 'DFW': '达拉斯', 'IAH': '休斯顿', 'ATL': '亚特兰大', 'MIA': '迈阿密',
+    'MCO': '奥兰多', 'BOS': '波士顿', 'JFK': '纽约', 'EWR': '纽瓦克', 'IAD': '华盛顿',
+    'DCA': '华盛顿', 'CLT': '夏洛特', 'DET': '底特律', 'MSP': '明尼阿波利斯',
+    'YYZ': '多伦多', 'YVR': '温哥华', 'YUL': '蒙特利尔', 'YEG': '埃德蒙顿',
+    'MEX': '墨西哥城', 'GDL': '瓜达拉哈拉',
+    'LHR': '伦敦', 'MAN': '曼彻斯特', 'EDI': '爱丁堡', 'DUB': '都柏林',
+    'FRA': '法兰克福', 'BER': '柏林', 'MUC': '慕尼黑', 'DUS': '杜塞尔多夫',
+    'HAM': '汉堡', 'STU': '斯图加特', 'CGN': '科隆', 'STR': '斯图加特',
+    'CDG': '巴黎', 'AMS': '阿姆斯特丹', 'RTM': '鹿特丹', 'BRU': '布鲁塞尔',
+    'LUX': '卢森堡', 'MAD': '马德里', 'BCN': '巴塞罗那', 'VLC': '瓦伦西亚',
+    'LIS': '里斯本', 'OTP': '布加勒斯特', 'WAW': '华沙', 'PRG': '布拉格',
+    'VIE': '维也纳', 'ZRH': '苏黎世', 'GVA': '日内瓦', 'MIL': '米兰', 'FCO': '罗马',
+    'CPH': '哥本哈根', 'OSL': '奥斯陆', 'ARN': '斯德哥尔摩', 'GOT': '哥德堡',
+    'HEL': '赫尔辛基', 'IST': '伊斯坦布尔', 'ATH': '雅典', 'BUD': '布达佩斯',
+    'DXB': '迪拜', 'RUH': '利雅得', 'JED': '吉达', 'TLV': '特拉维夫',
+    'JNB': '约翰内斯堡', 'CPT': '开普敦', 'LOS': '拉各斯', 'CAI': '开罗',
+    'GRU': '圣保罗', 'GIG': '里约', 'EZE': '布宜诺斯艾利斯', 'SCL': '圣地亚哥',
+    'BOG': '波哥大', 'LIM': '利马', 'UIO': '基多',
+    'SYD': '悉尼', 'MEL': '墨尔本', 'BNE': '布里斯班', 'PER': '珀斯', 'AKL': '奥克兰',
+    'PPT': '帕皮提', 'NOU': '努美阿',
+}
+LOC_CITY_ZH = {
+    'Hong Kong': '香港', 'Taipei': '台北', 'Kaohsiung': '高雄', 'Tokyo': '东京',
+    'Osaka': '大阪', 'Nagoya': '名古屋', 'Fukuoka': '福冈', 'Sapporo': '札幌',
+    'Seoul': '首尔', 'Busan': '釜山', 'Singapore': '新加坡', 'Bangkok': '曼谷',
+    'Kuala Lumpur': '吉隆坡', 'Manila': '马尼拉', 'Jakarta': '雅加达',
+    'Ho Chi Minh City': '胡志明', 'Hanoi': '河内', 'Yangon': '仰光',
+    'Mumbai': '孟买', 'Delhi': '德里', 'Chennai': '金奈', 'Bengaluru': '班加罗尔',
+    'Los Angeles': '洛杉矶', 'San Jose': '圣何塞', 'San Francisco': '旧金山',
+    'Seattle': '西雅图', 'Portland': '波特兰', 'Santa Ana': '圣安娜',
+    'Phoenix': '菲尼克斯', 'Las Vegas': '拉斯维加斯', 'San Diego': '圣迭戈',
+    'Ontario': '安大略', 'Sacramento': '萨克拉门托', 'Oakland': '奥克兰',
+    'Chicago': '芝加哥', 'Dallas': '达拉斯', 'Houston': '休斯顿', 'Atlanta': '亚特兰大',
+    'Miami': '迈阿密', 'Orlando': '奥兰多', 'Boston': '波士顿', 'New York': '纽约',
+    'Newark': '纽瓦克', 'Washington': '华盛顿', 'Charlotte': '夏洛特',
+    'Detroit': '底特律', 'Minneapolis': '明尼阿波利斯',
+    'Toronto': '多伦多', 'Vancouver': '温哥华', 'Montreal': '蒙特利尔',
+    'Mexico City': '墨西哥城', 'Guadalajara': '瓜达拉哈拉',
+    'London': '伦敦', 'Manchester': '曼彻斯特', 'Edinburgh': '爱丁堡',
+    'Dublin': '都柏林', 'Frankfurt': '法兰克福', 'Berlin': '柏林', 'Munich': '慕尼黑',
+    'Hamburg': '汉堡', 'Stuttgart': '斯图加特', 'Paris': '巴黎',
+    'Amsterdam': '阿姆斯特丹', 'Brussels': '布鲁塞尔', 'Luxembourg': '卢森堡',
+    'Madrid': '马德里', 'Barcelona': '巴塞罗那', 'Lisbon': '里斯本',
+    'Bucharest': '布加勒斯特', 'Warsaw': '华沙', 'Prague': '布拉格',
+    'Vienna': '维也纳', 'Zurich': '苏黎世', 'Geneva': '日内瓦', 'Milan': '米兰',
+    'Rome': '罗马', 'Copenhagen': '哥本哈根', 'Oslo': '奥斯陆',
+    'Stockholm': '斯德哥尔摩', 'Helsinki': '赫尔辛基', 'Istanbul': '伊斯坦布尔',
+    'Athens': '雅典', 'Budapest': '布达佩斯',
+    'Dubai': '迪拜', 'Riyadh': '利雅得', 'Jeddah': '吉达', 'Tel Aviv': '特拉维夫',
+    'Johannesburg': '约翰内斯堡', 'Cape Town': '开普敦', 'Lagos': '拉各斯',
+    'Cairo': '开罗', 'São Paulo': '圣保罗', 'Rio de Janeiro': '里约',
+    'Buenos Aires': '布宜诺斯艾利斯', 'Santiago': '圣地亚哥',
+    'Sydney': '悉尼', 'Melbourne': '墨尔本', 'Brisbane': '布里斯班',
+    'Perth': '珀斯', 'Auckland': '奥克兰',
+}
+# 国家/地区英文全称(出现在 loc/city 时)也映射到中文
+REGION_NAME_ZH = {
+    'United States': '美国', 'United Kingdom': '英国', 'Germany': '德国',
+    'France': '法国', 'Netherlands': '荷兰', 'Spain': '西班牙', 'Italy': '意大利',
+    'Canada': '加拿大', 'Australia': '澳大利亚', 'New Zealand': '新西兰',
+    'India': '印度', 'Brazil': '巴西', 'Mexico': '墨西哥', 'Russia': '俄罗斯',
+    'Turkey': '土耳其', 'Sweden': '瑞典', 'Norway': '挪威', 'Denmark': '丹麦',
+    'Finland': '芬兰', 'Poland': '波兰', 'Switzerland': '瑞士', 'Austria': '奥地利',
+    'Belgium': '比利时', 'Ireland': '爱尔兰', 'Portugal': '葡萄牙',
+    'Czech Republic': '捷克', 'Romania': '罗马尼亚', 'Greece': '希腊',
+    'Hungary': '匈牙利', 'Ukraine': '乌克兰', 'United Arab Emirates': '阿联酋',
+    'Saudi Arabia': '沙特', 'Israel': '以色列', 'South Africa': '南非',
+    'Thailand': '泰国', 'Vietnam': '越南', 'Malaysia': '马来西亚',
+    'Indonesia': '印尼', 'Philippines': '菲律宾', 'Japan': '日本',
+    'South Korea': '韩国', 'Singapore': '新加坡', 'Hong Kong': '香港',
+}
+
+
+def localize_node_fields(fields):
+    """把节点字段里可识别的地区/数据中心英文替换为中文。
+
+    仅替换 REGION_ZH/DC_ZH/LOC_CITY_ZH/REGION_NAME_ZH 命中项, 未知值原样保留,
+    绝不猜测或误改用户自定义地名。返回新字典, 不改动原 fields。
+    """
+    out = dict(fields)
+    region = (out.get('region') or '').strip().upper()
+    if region in REGION_ZH:
+        out['region'] = REGION_ZH[region]
+    dc = (out.get('dc') or '').strip().upper()
+    if dc in DC_ZH:
+        out['dc'] = DC_ZH[dc]
+    for k in ('loc', 'city'):
+        raw = (out.get(k) or '').strip()
+        if not raw:
+            continue
+        if raw in LOC_CITY_ZH:
+            out[k] = LOC_CITY_ZH[raw]
+        elif raw.title() in REGION_NAME_ZH:
+            out[k] = REGION_NAME_ZH[raw.title()]
+    return out
+
+
 DEFAULT_CONFIG = {
     'sources': [
         {
@@ -147,6 +269,7 @@ DEFAULT_CONFIG = {
         'timeout_minutes': 0,       # 单个源超时(分钟), 0 = 不限制
         'node': {
             'name_template': '{dc}-{loc}-{speed}MB/s',
+            'name_lang': 'zh',        # zh=节点名使用中文(地区/数据中心转中文) / en=保留英文原始字段
             'password': '4c89536c-905b-4c77-8ea3-3350a6060c68',
             'sni': 'edgetunnel-ekw.pages.dev',
             'host': 'edgetunnel-ekw.pages.dev',
@@ -1793,6 +1916,9 @@ class TaskRunner:
     def _node_name(self, r, settings, used):
         node_cfg = settings.get('node', {})
         fields = self._node_fields(r, settings)
+        lang = (node_cfg.get('name_lang') or 'zh').lower()
+        if lang == 'zh':
+            fields = localize_node_fields(fields)
         name = render_name_template(node_cfg.get('name_template') or '{dc}-{loc}-{speed}MB/s', fields)
         name = name.strip() or ('%s:%s' % (r['ip'], r['port']))
         base, i = name, 2

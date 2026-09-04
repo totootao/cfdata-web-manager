@@ -275,6 +275,46 @@ rules:
             app.render_clash_subscription('port: 7890\n', [('N', '1.1.1.1', 443)])
 
 
+class TestNodeNameLang(unittest.TestCase):
+    """节点名中英文转换: name_lang=zh 把命中字段转中文, en 原样; 未知值保留"""
+
+    def _row(self, dc='HKG', loc='Hong Kong', region='HK', city='Hong Kong'):
+        return {'ip': '1.2.3.4', 'port': '443', 'ipport': '1.2.3.4:443',
+                'speed': 42.41, 'speed_text': '42.41MB/s', 'latency': '10ms',
+                'dc': dc, 'loc': loc, 'region': region, 'city': city}
+
+    def _name(self, lang):
+        runner = app.TaskRunner(app.STORE)
+        settings = {'node': {'name_template': '{dc}-{loc}-{speed}MB/s',
+                             'name_lang': lang}}
+        return runner._node_name(self._row(), settings, set())
+
+    def test_zh_converts_fields(self):
+        self.assertEqual(self._name('zh'), '香港-香港-42.41MB/s')
+
+    def test_en_keeps_original(self):
+        self.assertEqual(self._name('en'), 'HKG-Hong Kong-42.41MB/s')
+
+    def test_unknown_values_preserved(self):
+        out = app.localize_node_fields({'dc': 'ZZZ', 'loc': 'Nowhere',
+                                        'region': 'XX', 'city': 'Xyz'})
+        self.assertEqual(out, {'dc': 'ZZZ', 'loc': 'Nowhere',
+                               'region': 'XX', 'city': 'Xyz'})
+
+    def test_region_code_and_city_name(self):
+        out = app.localize_node_fields({'region': 'US', 'dc': 'LAX',
+                                        'loc': 'Los Angeles', 'city': 'United States'})
+        self.assertEqual(out['region'], '美国')
+        self.assertEqual(out['dc'], '洛杉矶')
+        self.assertEqual(out['loc'], '洛杉矶')
+        self.assertEqual(out['city'], '美国')
+
+    def test_localize_does_not_mutate_input(self):
+        src = {'dc': 'HKG', 'loc': 'Hong Kong', 'region': 'HK', 'city': 'Hong Kong'}
+        app.localize_node_fields(src)
+        self.assertEqual(src['dc'], 'HKG')
+
+
 class TestAuth(unittest.TestCase):
     """可选 Basic 认证: 未配置时放行, 配置后校验; 令牌仅用于下载路径"""
 

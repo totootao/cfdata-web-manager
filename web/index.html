@@ -388,6 +388,12 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <div class="grid g3">
         <div class="field"><label>节点名模板</label><input type="text" id="nTemplate">
           <div class="hint">可用: {dc} {loc} {region} {speed} {latency} {ip} {port}</div></div>
+        <div class="field"><label>节点名语言</label>
+          <select id="nLang">
+            <option value="zh">中文（地区/数据中心转中文，默认）</option>
+            <option value="en">英文（保留原始字段）</option>
+          </select>
+          <div class="hint">中文下 {region}/{dc}/{loc}/{city} 命中对照表时替换为中文，未知值原样保留</div></div>
         <div class="field"><label>password</label><input type="text" id="nPassword"></div>
         <div class="field"><label>sni</label><input type="text" id="nSni"></div>
         <div class="field"><label>ws Host</label><input type="text" id="nHost"></div>
@@ -799,7 +805,7 @@ async function loadSettings(){
     $('sSubConv').value=String(!!s.sub_convert_enabled);
     $('sSubUrl').value=s.sub_convert_url||'';
     loadSubTpl();
-    $('nTemplate').value=n.name_template; $('nPassword').value=n.password;
+    $('nTemplate').value=n.name_template; $('nLang').value=(n.name_lang||'zh'); $('nPassword').value=n.password;
     $('nSni').value=n.sni; $('nHost').value=n.host; $('nPath').value=n.path;
     $('nFp').value=n.client_fingerprint||'chrome'; $('nSkip').value=String(!!n.skip_cert_verify);
     $('sBinary').value=s.binary_path||'';
@@ -829,7 +835,7 @@ async function saveSettings(){
     sub_convert_enabled:$('sSubConv').value==='true',
     sub_convert_url:$('sSubUrl').value.trim(),
     node:{
-      name_template:$('nTemplate').value.trim(), password:$('nPassword').value,
+      name_template:$('nTemplate').value.trim(), name_lang:$('nLang').value, password:$('nPassword').value,
       sni:$('nSni').value.trim(), host:$('nHost').value.trim(), path:$('nPath').value,
       client_fingerprint:$('nFp').value.trim()||'chrome', skip_cert_verify:$('nSkip').value==='true'
     }
@@ -1004,10 +1010,13 @@ async function showRun(id){
 }
 
 /* ---------- 主题切换 ---------- */
+// 默认保留暗色主题: 仅当用户显式选择过 light 时才用亮色, 不跟随系统偏好自动切换
 function initTheme(){
   const saved=localStorage.getItem('theme');
-  if(saved==='light' || (!saved && window.matchMedia('(prefers-color-scheme: light)').matches)){
+  if(saved==='light'){
     document.documentElement.setAttribute('data-theme','light');
+  }else{
+    document.documentElement.setAttribute('data-theme','dark');
   }
   updateThemeIcon();
 }
