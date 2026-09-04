@@ -14,7 +14,9 @@ CFData 优选 Web 管理平台（纯 Python 标准库实现，无第三方依赖
 """
 
 import argparse
+import base64
 import csv
+import hmac
 import io
 import json
 import os
@@ -76,6 +78,24 @@ QA_INPUT_PATH = os.path.join(LATEST_DIR, QA_INPUT_NAME)
 SUB_TEMPLATE_PATH = os.path.join(DATA_DIR, 'sub_template.yaml')
 SUB_TEMPLATE_META_PATH = os.path.join(DATA_DIR, 'sub_template.json')
 SUB_TEMPLATE_STALE_HOURS = 24
+
+# 子进程退出等待兜底: 超时或取消时先发 SIGTERM, 等待该秒数仍未退出则 SIGKILL。
+# 若 cfdata 忽略 SIGTERM(网络 IO 卡死等), 无兜底的 wait() 会永久阻塞, 任务线程
+# 卡在 _exec_cmd 内部 -> _running 恒为 True -> 之后所有任务与质检都被"正在运行
+# 中"拒绝, 只能重启服务才能恢复。
+PROC_TERM_WAIT = 30
+PROC_KILL_WAIT = 10
+
+# ---------------------------------------------------------------- 可选访问控制
+# 服务默认无任何鉴权, 监听 0.0.0.0 时任何能访问端口的人都能改配置/删源/下载订阅。
+# 同时设置 CFDATA_AUTH_USER 与 CFDATA_AUTH_PASS 即启用全站 HTTP Basic 认证
+# (不设置时行为与旧版本完全一致, 不影响已有部署)。
+# 订阅客户端(Clash 等)不便填密码时, 可用 CFDATA_SUB_TOKEN 给 /api/download/**
+# 配一个可写进 URL 的令牌: /api/download/latest/top_nodes.yaml?token=xxx
+AUTH_USER = (os.environ.get('CFDATA_AUTH_USER') or '').strip()
+AUTH_PASS = os.environ.get('CFDATA_AUTH_PASS') or ''
+AUTH_ENABLED = bool(AUTH_USER and AUTH_PASS)
+SUB_TOKEN = (os.environ.get('CFDATA_SUB_TOKEN') or '').strip()
 
 # CSV 导出字段(传给 cfdata -fields), 与中文表头一一对应
 CSV_FIELDS = 'ipport,latency,speed,dc,loc,region,city'
@@ -199,13 +219,24 @@ def parse_latency_ms(value):
 def bracket_v6_ipport(ipport):
     """官方扫描 CSV 的 ipport 为裸 IPv6(如 2606:4700::1:443), 写入测速输入文件前
     规范化为方括号格式 [2606:4700::1]:443 —— cfdata 的 -nsbfile 输入解析对带
-    方括号的 IPv6 支持最完整(与平台质检/历史池导出的输入格式一致)。IPv4 原样返回。"""
+    方括号的 IPv6 支持最完整(与平台质检/历史池导出的输入格式一致)。IPv4 原样返回。
+
+    仅当确实形如"IPv6 + 端口"时才改写: rpartition 对**不带端口**的裸地址会把末段
+    误当端口(如 2606:4700::1 -> [2606:4700:]:1), 因此改写前校验端口取值范围与
+    IP 地址合法性; 任一项不通过则原样返回, 避免产出错误的测速输入。
+    """
     if not ipport or ipport.startswith('[') or ipport.count(':') < 2:
         return ipport
-    ip, _, port = ipport.rpartition(':')
-    if ip and port.isdigit():
-        return '[%s]:%s' % (ip, port)
-    return ipport
+    ip, sep, port = ipport.rpartition(':')
+    if not sep or not ip or ip.endswith(':') or not port.isdigit():
+        return ipport
+    if not (0 < int(port) < 65536):
+        return ipport
+    try:
+        socket.inet_pton(socket.AF_INET6, ip)
+    except (OSError, ValueError):
+        return ipport
+    return '[%s]:%s' % (ip, port)
 
 
 def yaml_value(v):
@@ -418,7 +449,10 @@ def render_clash_subscription(template_text, entries):
     for pl in proxy_lines:
         m = head_re.search(pl)
         if m:
-            tpl_names.add(m.group(1).strip())
+            # 模板节点名常带引号({name: "节点A", ...}), 而 proxy-groups 的成员列表里
+            # 写的是不带引号的名字(- 节点A)。此处去掉引号再比对, 否则成员名对不上,
+            # 策略组成员不会替换 —— 生成的订阅里策略组将全部指向已不存在的旧节点。
+            tpl_names.add(m.group(1).strip().strip('"\''))
     first = proxy_lines[0]
     if not head_re.search(first):
         raise ValueError('模板节点行无法解析 name/server/port')
@@ -1506,11 +1540,24 @@ class TaskRunner:
                 self._proc = proc
             timeout = float(settings.get('timeout_minutes') or 0) * 60
             self._stream_output(proc, log, label, timeout, settings)
-            code = proc.wait()
+            # 超时/取消时 _stream_output 已发过 SIGTERM, 这里必须带超时等待:
+            # 子进程若不响应 SIGTERM, 无参数的 wait() 会永久阻塞 -> 执行锁无法
+            # 释放 -> 后续任务与质检全部被拒。等待超时后升级为 SIGKILL。
+            try:
+                code = proc.wait(timeout=PROC_TERM_WAIT)
+            except subprocess.TimeoutExpired:
+                log('%s 进程在 %d 秒内未响应终止信号, 强制结束' % (label, PROC_TERM_WAIT))
+                try:
+                    proc.kill()
+                    code = proc.wait(timeout=PROC_KILL_WAIT)
+                except Exception:
+                    log('%s 进程强制结束失败, 本次按失败处理' % label)
+                    code = None
             if self._cancel:
                 raise _CanceledError()
             if code != 0:
-                log('%s 进程退出码 %d' % (label, code))
+                # code 为 None 表示强制结束也未拿到退出码, 按失败处理
+                log('%s 进程退出码 %s' % (label, '未知(强制结束)' if code is None else code))
             rows = self._parse_csv(out_path)
             # 回写缓存 locations.json / GeoLite2-ASN.mmdb, 供后续运行复用(避免重复下载)
             run_locations = os.path.join(work_dir, 'locations.json')
@@ -1540,6 +1587,15 @@ class TaskRunner:
                     proc.kill()
                 except Exception:
                     pass
+            # 关闭 stdout 管道: 长期运行的服务每跑一次任务就泄漏一个 fd,
+            # 累积到上限后 Popen 会失败(每个源最多泄漏 2 个: stdout + stdin)
+            if proc is not None:
+                for stream in (proc.stdout, proc.stdin):
+                    try:
+                        if stream is not None and not stream.closed:
+                            stream.close()
+                    except Exception:
+                        pass
 
     def _exec_source_once(self, binary, src, idx, run_dir, settings, log, label):
         """执行一次 cfdata 测试, 返回 (rows, exit_code, error)
@@ -2517,6 +2573,48 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 静默访问日志
 
+    # ---- 访问控制(可选, 默认关闭) ----
+    def _authorized(self):
+        """Basic 认证校验; 未启用时直接放行"""
+        if not AUTH_ENABLED:
+            return True
+        header = self.headers.get('Authorization') or ''
+        if not header.startswith('Basic '):
+            return False
+        try:
+            raw = base64.b64decode(header[6:]).decode('utf-8')
+        except Exception:
+            return False
+        user, sep, pwd = raw.partition(':')
+        if not sep:
+            return False
+        # 定长比较, 避免时序侧信道
+        return (hmac.compare_digest(user, AUTH_USER)
+                and hmac.compare_digest(pwd, AUTH_PASS))
+
+    @staticmethod
+    def _token_ok(qs):
+        """下载接口的订阅令牌校验: 未配置 CFDATA_SUB_TOKEN 时不可用"""
+        if not SUB_TOKEN:
+            return False
+        token = (qs.get('token') or [''])[0]
+        return bool(token) and hmac.compare_digest(token, SUB_TOKEN)
+
+    def _require_auth(self, qs=None):
+        """未通过鉴权时返回 401 并结束请求; qs 非空且令牌匹配则放行"""
+        if self._authorized():
+            return True
+        if qs is not None and self._token_ok(qs):
+            return True
+        body = b'Unauthorized'
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="cfdata-web-manager"')
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
     # ---- 响应辅助 ----
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -2555,6 +2653,9 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
         try:
+            # 启用鉴权时, 仅订阅下载路径接受 ?token= 免密码访问(便于 Clash 等客户端拉取)
+            if not self._require_auth(qs if path.startswith('/api/download/') else None):
+                return
             if path in ('/', '/index.html'):
                 index = os.path.join(WEB_DIR, 'index.html')
                 if not os.path.exists(index):
@@ -2683,8 +2784,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        body = self._body()
+        body = self._body()  # 先消费请求体, 避免 401 时残留数据污染后续请求
         try:
+            if not self._require_auth():  # 写操作一律需要认证(令牌仅用于下载)
+                return
             if path == '/api/sources':
                 try:
                     src = STORE.add_source(body.get('name', ''), body.get('url', ''),
@@ -2768,6 +2871,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        # 删除操作(清历史池/删源)必须鉴权, 否则任何人都能清空你的节点池
+        if not self._require_auth():
+            return
         if parsed.path == '/api/history':
             HISTORY.clear()
             return self._json({'ok': True})
@@ -2804,6 +2910,12 @@ def main():
     qa_cron = STORE.get().get('qa_cron', {})
     print('[init] Top 节点质检: %s' % (
         '定时已启用 (%s)' % qa_cron.get('expr', '') if qa_cron.get('enabled') else '手动触发(可配置独立定时)'))
+    if AUTH_ENABLED:
+        print('[init] 访问控制: Basic 认证已启用 (用户 %s)%s'
+              % (AUTH_USER, ', 订阅令牌已配置' if SUB_TOKEN else ', 未配置订阅令牌'))
+    else:
+        print('[init] 访问控制: 未启用(设置 CFDATA_AUTH_USER/PASS 开启) —— '
+              '请勿将端口直接暴露到公网')
 
     # 启动时预生成 cfdata 配置文件, 避免首次正式任务被中断
     binary = RUNNER.locate_binary()

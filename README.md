@@ -268,6 +268,46 @@ docker run -d -p 8088:8088 -v cfdata-results:/app/results cfdata-web-manager
 
 > 镜像基于 `python:3.11-slim`，内置 cfdata-linux-amd64，仅支持 `linux/amd64` 平台。定时任务由应用内置 cron 调度器执行，容器需保持常驻运行。
 
+## 访问控制（可选）
+
+服务默认**不启用任何鉴权**，监听 `0.0.0.0` 时任何能访问端口的人都能改配置、删源、清空节点池或下载订阅。通过环境变量可开启 HTTP Basic 认证：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `CFDATA_AUTH_USER` | Basic 认证用户名；与下面的密码**同时设置**才启用 |
+| `CFDATA_AUTH_PASS` | Basic 认证密码 |
+| `CFDATA_SUB_TOKEN` | 订阅令牌；启用鉴权后 `/api/download/**` 可用 `?token=xxx` 免密码访问 |
+
+```bash
+docker run -d \
+  --name cfdata-web \
+  --restart unless-stopped \
+  -p 8088:8088 \
+  -e CFDATA_AUTH_USER=admin \
+  -e CFDATA_AUTH_PASS=你的强密码 \
+  -e CFDATA_SUB_TOKEN=一串随机令牌 \
+  -v cfdata-results:/app/results \
+  -v cfdata-data:/app/data \
+  totootao/cfdata-web-manager:latest
+```
+
+- 未设置 `CFDATA_AUTH_USER`/`CFDATA_AUTH_PASS` 时行为与旧版本**完全一致**，不影响已有部署
+- 开启后页面与所有接口（含 `DELETE` 删源 / 清池）都需要认证；**订阅令牌只对 `/api/download/**` 生效**，不能用于其他接口
+- 订阅令牌用于 Clash 等不便填密码的客户端：
+  `http://服务器IP:8088/api/download/latest/top_nodes.yaml?token=一串随机令牌`
+- 仍建议不要把端口直接暴露到公网，可配合反向代理再加一层限制
+
+## 自测
+
+核心逻辑（地址规范化、CSV 解析、cron、日志序号、历史池淘汰、订阅模板转换、进程终止兜底等）带有标准库 unittest 用例：
+
+```bash
+python3 tests/test_core.py
+# 或 python3 -m unittest discover -s tests
+```
+
+测试会把数据目录指向临时目录，不会读写真实配置与节点池。
+
 ## 等价命令
 
 平台的任务执行等价于对每个已启用源运行：
