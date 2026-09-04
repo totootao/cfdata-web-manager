@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CFData 优选管理平台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect rx='24' width='100' height='100' fill='%235763f2'/%3E%3Cpath d='M58 18L38 52h17L45 82l27-38H52l12-26z' fill='%23facc15'/%3E%3C/svg%3E">
 <style>
 :root{
   --bg:#0b1020;--bg2:#111832;--card:#151d3a;--card2:#1a2447;
@@ -11,6 +12,33 @@
   --accent:#4f7cff;--accent2:#6c5ce7;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;
   --cyan:#22d3ee;--radius:14px;
 }
+html[data-theme="light"]{
+  --bg:#f4f6fb;--bg2:#e8ecf5;--card:#ffffff;--card2:#f7f9fc;
+  --border:#d8deeb;--text:#1a2035;--muted:#5e6785;--dim:#8a94b0;
+  --accent:#4f7cff;--accent2:#6c5ce7;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;
+  --cyan:#0891b2;--radius:14px;
+}
+html[data-theme="light"] body{background:radial-gradient(1200px 600px at 80% -10%,#c7d2fe 0%,var(--bg) 55%)}
+html[data-theme="light"] .badge.run{background:rgba(79,124,255,.12);color:#3b5bdb;border-color:rgba(79,124,255,.35)}
+html[data-theme="light"] .badge.idle{background:rgba(16,185,129,.10);color:#0f9c6e;border-color:rgba(16,185,129,.30)}
+html[data-theme="light"] .badge.err{background:rgba(239,68,68,.10);color:#dc2626;border-color:rgba(239,68,68,.30)}
+html[data-theme="light"] .btn-danger{background:rgba(239,68,68,.10);color:#dc2626;border-color:rgba(239,68,68,.35)}
+html[data-theme="light"] .btn-danger:hover:not(:disabled){background:rgba(239,68,68,.20)}
+html[data-theme="light"] .btn-ghost{color:var(--muted);border-color:var(--border)}
+html[data-theme="light"] .btn-primary{color:#fff}
+html[data-theme="light"] .dl{background:rgba(79,124,255,.10);color:#3b5bdb;border-color:rgba(79,124,255,.30)}
+html[data-theme="light"] .dl:hover{background:rgba(79,124,255,.20)}
+html[data-theme="light"] #logbox,html[data-theme="light"] pre.code{background:#f0f3fa;color:var(--text)}
+html[data-theme="light"] .copy-btn{background:rgba(8,145,178,.10);color:var(--cyan);border-color:rgba(8,145,178,.30)}
+html[data-theme="light"] .copy-btn:hover{background:rgba(8,145,178,.20)}
+html[data-theme="light"] .toast.ok{background:#10b981}
+html[data-theme="light"] .toast.err{background:#ef4444}
+html[data-theme="light"] .card{background:linear-gradient(180deg,var(--card),var(--card2));box-shadow:0 8px 28px rgba(31,41,65,.10)}
+html[data-theme="light"] nav{background:var(--bg2)}
+html[data-theme="light"] .stat{background:var(--bg2)}
+html[data-theme="light"] .runrow{background:var(--bg2)}
+html[data-theme="light"] .runrow:hover{border-color:var(--accent)}
+html[data-theme="light"] input,html[data-theme="light"] select{background:#fff}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:"Noto Sans CJK SC","Microsoft YaHei","PingFang SC",-apple-system,sans-serif;
   background:radial-gradient(1200px 600px at 80% -10%,#1a2a5e 0%,var(--bg) 55%);
@@ -20,7 +48,7 @@ header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18p
 .logo{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;
   background:linear-gradient(135deg,var(--accent),var(--accent2));font-size:20px;box-shadow:0 6px 18px rgba(79,124,255,.35)}
 h1{font-size:20px;font-weight:700;letter-spacing:.5px}
-.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.sub{color:var(--muted);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;word-break:keep-all;text-wrap:balance}
 .badge{padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
 .badge.run{background:rgba(79,124,255,.15);color:#8fb0ff;border:1px solid rgba(79,124,255,.4)}
 .badge.idle{background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.35)}
@@ -124,7 +152,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
 @media (max-width:720px){
   .wrap{padding:14px 12px 40px}
   h1{font-size:17px}
-  header .sub{font-size:11px}
+  header .sub{font-size:11px;white-space:normal;overflow:visible}
   header{gap:10px}
   header .logo{width:36px;height:36px;font-size:16px}
   header button{padding:8px 13px;font-size:12px}
@@ -155,7 +183,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
 <body>
 <div class="wrap">
   <header>
-    <div class="logo">⚡</div>
+    <div class="logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 3L8 13h4.5L10 21l7-9h-4.5L16 3z" fill="#facc15"/></svg></div>
     <div>
       <h1>CFData 优选管理平台</h1>
       <div class="sub">多源测速 · 定时任务 · 自动提取 Top 节点（TXT + Clash YAML）</div>
@@ -164,6 +192,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
     <span class="badge idle" id="statusBadge"><span class="dot"></span>空闲</span>
     <button class="btn-primary" id="btnRun" onclick="triggerRun()">▶ 手动运行</button>
     <button class="btn-danger" id="btnCancel" onclick="cancelRun()" style="display:none">■ 取消任务</button>
+    <button class="btn-ghost" id="themeToggle" onclick="toggleTheme()" title="切换主题" style="padding:9px 11px;font-size:16px">🌙</button>
   </header>
 
   <nav>
@@ -974,7 +1003,28 @@ async function showRun(id){
   }catch(e){ toast(e.message,false) }
 }
 
+/* ---------- 主题切换 ---------- */
+function initTheme(){
+  const saved=localStorage.getItem('theme');
+  if(saved==='light' || (!saved && window.matchMedia('(prefers-color-scheme: light)').matches)){
+    document.documentElement.setAttribute('data-theme','light');
+  }
+  updateThemeIcon();
+}
+function toggleTheme(){
+  const html=document.documentElement;
+  const isLight=html.getAttribute('data-theme')==='light';
+  html.setAttribute('data-theme',isLight?'dark':'light');
+  localStorage.setItem('theme',isLight?'dark':'light');
+  updateThemeIcon();
+}
+function updateThemeIcon(){
+  const btn=$('themeToggle'); if(!btn) return;
+  btn.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☀️':'🌙';
+}
+
 /* ---------- 初始化 ---------- */
+initTheme();
 pollState();
 loadSettings();
 setInterval(pollState, 2500);
