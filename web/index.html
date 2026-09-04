@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>CFData 优选管理平台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect rx='24' width='100' height='100' fill='%235763f2'/%3E%3Cpath d='M58 18L38 52h17L45 82l27-38H52l12-26z' fill='%23facc15'/%3E%3C/svg%3E">
 <style>
@@ -150,23 +150,28 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
 
 /* ---------- 移动端适配 ---------- */
 @media (max-width:720px){
-  .wrap{padding:14px 12px 40px}
-  h1{font-size:17px;line-height:1.25}
-  header .sub{font-size:11px;white-space:normal;overflow:visible;word-break:keep-all;text-wrap:balance}
-  header{gap:8px 10px;align-items:center}
-  header .logo{width:34px;height:34px;font-size:15px;flex-shrink:0;align-self:center}
-  header button{padding:7px 11px;font-size:12px}
-  /* 标题块(第二个直接子 div)与 logo 并排, 允许压缩; spacer 撑满一行当换行器,
-     把按钮组整体推到下一行 —— 避免 logo 孤零零掉到第一行 */
-  header>div:not(.logo):not(.spacer){min-width:0;flex:1 1 auto}
-  header .spacer{flex:0 0 100%;height:0;min-height:0}
-  /* 按钮组在新一行, 状态徽章 + 主操作按钮 + 取消 + 主题, 允许自然折行 */
-  header>.badge,header>.btn-primary,header>.btn-danger,header>.btn-ghost{flex-shrink:0}
-  /* nav 横向滚动, 自动把激活项滚到可视区, 不让最左边的 tab 被遮 */
-  nav{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;
-       scroll-padding-inline:8px}
-  nav::-webkit-scrollbar{display:none}
-  nav button{white-space:nowrap;padding:8px 12px;font-size:12px;flex-shrink:0}
+  .wrap{padding:14px 12px calc(28px + env(safe-area-inset-bottom))}
+  /* header 固定为两行式, 不依赖 flex 自动折行的偶然结果:
+       第 1 行 = [logo][标题 + 副标题]
+       第 2 行 = [状态徽章][手动运行][取消任务][主题]
+     标题块的 flex-basis 直接吃掉"整行 - logo - 间距"的宽度,
+     后面的按钮组因此必定整体换到第二行, 不会出现 logo 独占一行的情况 */
+  header{gap:8px;align-items:center;margin-bottom:14px}
+  .logo{width:36px;height:36px;font-size:16px;flex-shrink:0}
+  h1{font-size:16px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  header .sub{font-size:11px;line-height:1.45;margin-top:3px;
+    white-space:normal;overflow:visible;word-break:keep-all}
+  header>div:not(.logo):not(.spacer){flex:1 1 calc(100% - 44px);min-width:0}
+  header .spacer{display:none}
+  header>.badge,header>.btn-primary,header>.btn-danger,header>.btn-ghost{flex:0 0 auto}
+  /* 运行中"手动运行"只是 disabled 但仍占位, 与"取消任务"同时存在 → 收紧内边距,
+     保证 徽章+运行+取消+主题 四项在 320px 窄屏也仍在同一行 */
+  header button{padding:8px 10px;font-size:12.5px}
+  header .btn-ghost{padding:8px 10px;font-size:15px}
+  header .badge{padding:4px 9px;font-size:11.5px}
+  /* nav 自动换行: 5 个 tab 全部常驻可见, 不靠横向滚动, 首尾不会被裁掉 */
+  nav{flex-wrap:wrap;overflow:visible;gap:6px}
+  nav button{flex:1 1 auto;text-align:center;white-space:nowrap;padding:9px 10px;font-size:12.5px}
   .stats{grid-template-columns:repeat(2,1fr);gap:9px}
   .stat{padding:11px}
   .stat .v{font-size:17px}
@@ -486,10 +491,6 @@ function switchTab(id, btn){
   btn.classList.add('active');
   ['tab-run','tab-src','tab-cron','tab-set','tab-res'].forEach(t=>$(t).style.display = t===id?'':'none');
   curTab = id;
-  // 移动端 nav 横向滚动, 把激活 tab 滚到可视区, 避免被两端裁切
-  if(btn && btn.scrollIntoView){
-    btn.scrollIntoView({block:'nearest', inline:'nearest', behavior:'smooth'});
-  }
   if(id==='tab-res') loadRuns();
   if(id==='tab-src'){ loadSources(); loadHistory(); }
   if(id==='tab-cron'){ loadCronState(); loadQaState(); }
