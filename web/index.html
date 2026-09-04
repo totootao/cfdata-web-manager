@@ -421,7 +421,7 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
 <div class="toast" id="toast"></div>
 
 <script>
-let logSeq = 0, pollTimer = null, curTab = 'tab-run', stateCache = null;
+let logSeq = 0, pollTimer = null, curTab = 'tab-run', stateCache = null, lastRunStart = null;
 
 function $(id){return document.getElementById(id)}
 function toast(msg, ok=true){
@@ -481,6 +481,12 @@ async function pollLog(){
   }catch(e){}
 }
 function renderState(d){
+  // 新一轮任务/质检开始时重置日志游标 —— 定时触发或在别的标签页触发时前端不会
+  // 主动归零, 这里按 started_at 变化识别新一轮, 让日志区只展示本轮内容
+  if(d.started_at && d.started_at !== lastRunStart){
+    lastRunStart = d.started_at;
+    if(logSeq !== 0){ logSeq = 0; $('logbox').innerHTML=''; }
+  }
   const badge = $('statusBadge');
   const qaBtn = $('btnQa');
   if(d.running){
@@ -676,7 +682,12 @@ async function triggerQa(){
     const j = await api('/api/qa',{method:'POST'});
     // 409 拒绝时响应体为 {ok:false, message:...}, 正常展示拒绝原因
     toast(j.message||'质检已启动', j.ok);
-    if(j.ok) pollState();
+    if(j.ok){
+      // 与手动运行一致: 重置日志游标并清空, 否则质检日志读不到(前端游标停留在上一轮高位)
+      logSeq = 0; $('logbox').innerHTML='';
+      switchTab('tab-run', document.querySelector('nav button'));
+      pollState();
+    }
   }catch(e){ toast(e.message,false) }
 }
 function loadQaState(){

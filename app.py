@@ -867,20 +867,39 @@ class CronExpr:
 
 
 # ---------------------------------------------------------------- 日志缓冲
+# 日志行序号全局单调递增: 每轮任务/质检启动时 _run()/_run_qa() 都会清空日志缓冲,
+# 若序号随之归零, 前端 after=<上次的高位序号> 在新一轮里永远读不到任何行 —— 表现为
+# 首页日志框卡在旧内容不动(尤其定时触发与质检触发, 因为手动触发时前端会重置游标)。
+# 序号不回退即可根治: 新一轮的日志序号必定大于前端已持有的游标。
+_LOG_SEQ_LOCK = threading.Lock()
+_LOG_SEQ = 0
+
+
+def _next_log_seq():
+    global _LOG_SEQ
+    with _LOG_SEQ_LOCK:
+        _LOG_SEQ += 1
+        return _LOG_SEQ
+
+
 class LogBuffer:
     def __init__(self, maxlen=4000):
         self._lock = threading.Lock()
         self._lines = []       # [(seq, line)]
-        self._seq = 0
         self._maxlen = maxlen
+
+    def clear(self):
+        """清空已缓存的行; 序号继续递增, 不回退"""
+        with self._lock:
+            self._lines = []
 
     def write(self, line):
         with self._lock:
-            self._seq += 1
-            self._lines.append((self._seq, line))
+            seq = _next_log_seq()
+            self._lines.append((seq, line))
             if len(self._lines) > self._maxlen:
                 self._lines = self._lines[-self._maxlen:]
-            return self._seq
+            return seq
 
     def read(self, after=0):
         with self._lock:
@@ -1092,7 +1111,8 @@ class TaskRunner:
     # ---- 主流程 ----
     def _run(self, trigger):
         run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.log = LogBuffer()
+        # 清空上一轮日志但保留 LogBuffer 对象本身: 序号持续递增, 前端游标不会失效
+        self.log.clear()
         self._set(running=True, kind='task', phase='preparing', trigger=trigger, run_id=run_id,
                   started_at=now_str(), finished_at=None, current_source='',
                   progress_done=0, progress_total=0, message='')
@@ -1901,7 +1921,8 @@ class TaskRunner:
         追加质检信息, 不触碰 runs 历史记录、历史节点池与主任务的合并/排序/提取逻辑。
         """
         run_id = 'qa_' + datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.log = LogBuffer()
+        # 同 _run(): 只清空内容, 序号继续递增
+        self.log.clear()
         self._set(running=True, kind='qa', phase='qa', trigger=trigger, run_id=run_id,
                   started_at=now_str(), finished_at=None, current_source='质检',
                   progress_done=0, progress_total=1, message='质检进行中')
