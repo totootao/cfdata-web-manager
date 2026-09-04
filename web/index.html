@@ -55,7 +55,8 @@ h1{font-size:20px;font-weight:700;letter-spacing:.5px}
 .badge.err{background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.35)}
 .dot{width:8px;height:8px;border-radius:50%;background:currentColor;animation:pulse 1.4s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-.spacer{flex:1}
+/* .actions: 头部右侧控件组(状态徽章/手动运行/取消任务/主题), 桌面端整体靠右 */
+.actions{display:flex;align-items:center;gap:12px;margin-left:auto}
 button{cursor:pointer;border:none;border-radius:10px;font-size:13px;font-weight:600;
   padding:9px 16px;color:#fff;transition:.15s;font-family:inherit}
 button:disabled{opacity:.45;cursor:not-allowed}
@@ -161,8 +162,12 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
   h1{font-size:16px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   header .sub{font-size:11px;line-height:1.45;margin-top:3px;
     white-space:normal;overflow:visible;word-break:keep-all}
-  header>div:not(.logo):not(.spacer){flex:1 1 calc(100% - 44px);min-width:0}
-  header .spacer{display:none}
+  /* 标题块吃掉整行剩余宽度, 与 logo 占满第 1 行; .actions 整体换到第 2 行并右对齐
+     (.actions 需从标题块选择器中排除, 否则会与标题块争夺第 1 行宽度) */
+  header>div:not(.logo):not(.spacer):not(.actions){flex:1 1 calc(100% - 44px);min-width:0}
+  /* 控件组 .actions: 占满第 2 行整行, 内部 justify-content:flex-end 使
+     [状态徽章][手动运行][取消任务][主题] 整组右对齐; 极窄屏组内换行时每行仍保持右对齐 */
+  header .actions{width:100%;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px;margin-left:0}
   header>.badge,header>.btn-primary,header>.btn-danger,header>.btn-ghost{flex:0 0 auto}
   /* 运行中"手动运行"只是 disabled 但仍占位, 与"取消任务"同时存在 → 收紧内边距,
      保证 徽章+运行+取消+主题 四项在 320px 窄屏也仍在同一行 */
@@ -201,11 +206,12 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <h1>CFData 优选管理平台</h1>
       <div class="sub">多源测速 · 定时任务 · 自动提取 Top 节点（TXT + Clash YAML）</div>
     </div>
-    <div class="spacer"></div>
-    <span class="badge idle" id="statusBadge"><span class="dot"></span>空闲</span>
-    <button class="btn-primary" id="btnRun" onclick="triggerRun()">▶ 手动运行</button>
-    <button class="btn-danger" id="btnCancel" onclick="cancelRun()" style="display:none">■ 取消任务</button>
-    <button class="btn-ghost" id="themeToggle" onclick="toggleTheme()" title="切换主题" style="padding:9px 11px;font-size:16px">🌙</button>
+    <div class="actions">
+      <span class="badge idle" id="statusBadge"><span class="dot"></span>空闲</span>
+      <button class="btn-primary" id="btnRun" onclick="triggerRun()">▶ 手动运行</button>
+      <button class="btn-danger" id="btnCancel" onclick="cancelRun()" style="display:none">■ 取消任务</button>
+      <button class="btn-ghost" id="themeToggle" onclick="toggleTheme()" title="切换主题" style="padding:9px 11px;font-size:16px">🌙</button>
+    </div>
   </header>
 
   <nav>
