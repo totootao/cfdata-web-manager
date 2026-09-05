@@ -526,7 +526,10 @@ async function pollLog(){
         else if(/失败|异常|取消|超时|错误/.test(line)) cls='err';
         else if(/开始测试|开始扫描|开始测速/.test(line)) cls='hl';
         div.className = cls;
-        div.textContent = line;
+        // 转义后高亮加粗: 时延(45.2ms)与网速(42.41MB/s), 数值含可选小数与单位间可选空格
+        div.innerHTML = esc(line)
+          .replace(/(\d+(?:\.\d+)?)\s*MB\/s\b/g, '<b>$1MB/s</b>')
+          .replace(/(\d+(?:\.\d+)?)\s*ms\b/g, '<b>$1ms</b>');
         box.appendChild(div);
       }
       logSeq = d.seq;
