@@ -2449,11 +2449,12 @@ class TaskRunner:
                 '回归 %d 个 (latest 已重写, 运行历史/历史池未动)'
                 % (len(ipports), len(kept), kept_v4_n, kept_v6_n,
                    len(pruned), len(failed), len(revived)))
-            # 把质检结果清单打印到日志(保留节点与刚重写的订阅文件一致)
-            self._log_qa_summary(log, run_id, trigger, time.time() - t0, len(ipports),
-                                 final_rows, pruned, revived, failed)
             if not final_rows:
                 log('警告: Top 节点本次全部未达标, latest 订阅内容为空, 建议尽快触发一次完整任务')
+            # 把质检结果清单打印到日志(保留节点与刚重写的订阅文件一致);
+            # 放在日志最末尾、紧邻结束标记之前, 便于直接在底部查看本轮结果
+            self._log_qa_summary(log, run_id, trigger, time.time() - t0, len(ipports),
+                                 final_rows, pruned, revived, failed)
             log('===== 质检完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       message='质检完成: 保留 %d (v4 %d / v6 %d) / 剔除 %d / 回归 %d'
