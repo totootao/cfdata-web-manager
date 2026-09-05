@@ -11,12 +11,16 @@
   --border:#263258;--text:#e6ebff;--muted:#8b96c2;--dim:#5a668f;
   --accent:#4f7cff;--accent2:#6c5ce7;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;
   --cyan:#22d3ee;--radius:14px;
+  /* 日志数值着色(暗色底 #0a0f22 上取高亮度色): 好/中/差 三档 */
+  --v-good:#34d399;--v-mid:#fbbf24;--v-bad:#f87171;
 }
 html[data-theme="light"]{
   --bg:#f4f6fb;--bg2:#e8ecf5;--card:#ffffff;--card2:#f7f9fc;
   --border:#d8deeb;--text:#1a2035;--muted:#5e6785;--dim:#8a94b0;
   --accent:#4f7cff;--accent2:#6c5ce7;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;
   --cyan:#0891b2;--radius:14px;
+  /* 日志数值着色(亮色底 #f0f3fa 上取深色调保证对比度): 好/中/差 三档 */
+  --v-good:#047857;--v-mid:#b45309;--v-bad:#b91c1c;
 }
 html[data-theme="light"] body{background:radial-gradient(1200px 600px at 80% -10%,#c7d2fe 0%,var(--bg) 55%)}
 html[data-theme="light"] .badge.run{background:rgba(79,124,255,.12);color:#3b5bdb;border-color:rgba(79,124,255,.35)}
@@ -110,6 +114,11 @@ input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79
 #logbox .hl{color:var(--cyan)}
 #logbox .ok{color:var(--ok)}
 #logbox .err{color:var(--err)}
+/* 日志中的时延/网速数值: 加粗并按档位着色(覆盖整行颜色, 数值始终是视觉焦点) */
+#logbox b.v-good,#logbox b.v-mid,#logbox b.v-bad{font-weight:700}
+#logbox b.v-good{color:var(--v-good)}
+#logbox b.v-mid{color:var(--v-mid)}
+#logbox b.v-bad{color:var(--v-bad)}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border)}
 th{color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap}
@@ -492,6 +501,13 @@ async function api(path, opts={}){
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 
+/* ---------- 日志数值着色(绿=好 / 琥珀=中 / 红=差) ---------- */
+// 分档阈值, 贴合 Cloudflare 优选场景: 延迟越低越好, 网速越高越好
+const LOG_LAT_MID = 150, LOG_LAT_BAD = 300;   // 时延 ms: <=150 好, <=300 中, >300 差
+const LOG_SPD_GOOD = 10, LOG_SPD_MID = 2;     // 网速 MB/s: >=10 好, >=2 中, <2 差
+function latClass(v){ return v <= LOG_LAT_MID ? 'v-good' : (v <= LOG_LAT_BAD ? 'v-mid' : 'v-bad'); }
+function spdClass(v){ return v >= LOG_SPD_GOOD ? 'v-good' : (v >= LOG_SPD_MID ? 'v-mid' : 'v-bad'); }
+
 /* ---------- Tab ---------- */
 function switchTab(id, btn){
   document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
@@ -526,10 +542,11 @@ async function pollLog(){
         else if(/失败|异常|取消|超时|错误/.test(line)) cls='err';
         else if(/开始测试|开始扫描|开始测速/.test(line)) cls='hl';
         div.className = cls;
-        // 转义后高亮加粗: 时延(45.2ms)与网速(42.41MB/s), 数值含可选小数与单位间可选空格
+        // 转义后高亮: 网速(42.41MB/s)与时延(45.2ms)加粗 + 按档位着色;
+        // 替换发生在 HTML 转义之后, 日志内容不会被当作标签解析
         div.innerHTML = esc(line)
-          .replace(/(\d+(?:\.\d+)?)\s*MB\/s\b/g, '<b>$1MB/s</b>')
-          .replace(/(\d+(?:\.\d+)?)\s*ms\b/g, '<b>$1ms</b>');
+          .replace(/(\d+(?:\.\d+)?)\s*MB\/s\b/g, (m, n) => '<b class="'+spdClass(+n)+'">'+m+'</b>')
+          .replace(/(\d+(?:\.\d+)?)\s*ms\b/g, (m, n) => '<b class="'+latClass(+n)+'">'+m+'</b>');
         box.appendChild(div);
       }
       logSeq = d.seq;
