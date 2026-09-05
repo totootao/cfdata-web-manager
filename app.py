@@ -78,6 +78,9 @@ QA_INPUT_PATH = os.path.join(LATEST_DIR, QA_INPUT_NAME)
 SUB_TEMPLATE_PATH = os.path.join(DATA_DIR, 'sub_template.yaml')
 SUB_TEMPLATE_META_PATH = os.path.join(DATA_DIR, 'sub_template.json')
 SUB_TEMPLATE_STALE_HOURS = 24
+# 任务结束时打印到日志的结果清单, 每个栈最多打印的行数(超出截断并提示见文件,
+# 避免 top_n 设置很大时把日志缓冲挤满)
+SUMMARY_MAX_LINES = 50
 
 # 子进程退出等待兜底: 超时或取消时先发 SIGTERM, 等待该秒数仍未退出则 SIGKILL。
 # 若 cfdata 忽略 SIGTERM(网络 IO 卡死等), 无兜底的 wait() 会永久阻塞, 任务线程
@@ -1305,6 +1308,7 @@ class TaskRunner:
     # ---- 主流程 ----
     def _run(self, trigger):
         run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+        t0 = time.time()  # 任务总耗时(结束时打印结果汇总用)
         # 清空上一轮日志但保留 LogBuffer 对象本身: 序号持续递增, 前端游标不会失效
         self.log.clear()
         self._set(running=True, kind='task', phase='preparing', trigger=trigger, run_id=run_id,
@@ -1513,6 +1517,9 @@ class TaskRunner:
                 len(top_v6), os.path.basename(v6_txt_path), os.path.basename(v6_yaml_path)))
             log('已生成分源优选结果: %s / %s (每源速度最快 %d 个)' % (
                 os.path.basename(by_source_path), os.path.basename(by_source_yaml_path), per_source_n))
+            # 把最终结果清单打印到日志(可直接查看/复制, 不必下载文件)
+            self._log_final_summary(log, record, top_v4, top_v6, source_reports,
+                                    time.time() - t0, settings)
             log('===== 任务完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       current_source='', message='成功: IPv4 %d 个 / IPv6 %d 个节点'
@@ -1533,6 +1540,52 @@ class TaskRunner:
             with self._lock:
                 self._running = False
                 self._proc = None
+
+    def _log_final_summary(self, log, record, top_v4, top_v6, source_reports, elapsed, settings):
+        """任务成功结束时把最终结果清单打印到日志
+
+        此前日志只有统计摘要, 想看具体入选节点必须下载文件。这里按与输出文件
+        完全一致的格式(ip:port#速度-数据中心-位置)逐行打印最终 Top 节点, 便于在
+        页面日志里直接查看与复制; 节点过多时按 SUMMARY_MAX_LINES 截断并提示,
+        完整内容仍以 results/ 下的输出文件为准。
+        """
+        def _fmt(rows):
+            return ['%s#%s-%s-%s' % (r['ipport'], r['speed_text'],
+                                     r['dc'] or 'CF', r['loc'] or 'XX') for r in rows]
+
+        log('=' * 40)
+        log('最终结果汇总 | 运行 ID %s | 触发方式 %s | 总耗时 %.1f 秒'
+            % (record.get('id', ''),
+               '手动' if record.get('trigger') == 'manual' else '定时', elapsed))
+        log('有效节点 %d 个 -> 提取 IPv4 %d 个 / IPv6 %d 个 (每栈上限 %d)'
+            % (record.get('total_nodes', 0), len(top_v4), len(top_v6),
+               int(settings.get('top_n') or 20)))
+        # 各源执行情况: 成功/失败/测速未达标三种口径
+        for r in source_reports or []:
+            if r.get('ok'):
+                status = '成功'
+            elif r.get('error'):
+                status = '失败'
+            else:
+                status = '无达标节点'
+            log('  · %s: %s, %d 个节点, 耗时 %.1f 秒, 尝试 %d 次'
+                % (r.get('name', '?'), status, r.get('count', 0),
+                   float(r.get('elapsed_sec') or 0), r.get('attempts', 1)))
+            if r.get('error'):
+                log('      原因: %s' % r['error'])
+        for title, rows in (('IPv4 Top %d (top_nodes.txt)' % len(top_v4), top_v4),
+                            ('IPv6 Top %d (top_nodes_v6.txt)' % len(top_v6), top_v6)):
+            if not rows:
+                continue
+            lines = _fmt(rows)
+            log('---- %s ----' % title)
+            for ln in lines[:SUMMARY_MAX_LINES]:
+                log(ln)
+            if len(lines) > SUMMARY_MAX_LINES:
+                log('  …… 其余 %d 个节点见输出文件' % (len(lines) - SUMMARY_MAX_LINES))
+        log('输出目录: results/latest/ (top_nodes.* / top_nodes_v6.* / '
+            'all_sorted*.txt / top_by_source.*)')
+        log('=' * 40)
 
     def _finish_run_record(self, run_id, status):
         try:
