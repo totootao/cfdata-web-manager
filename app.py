@@ -1347,6 +1347,12 @@ class TaskRunner:
                     logf.write(line + '\n')
                     logf.flush()
 
+            def log_raw(msg):
+                self.log.write(msg)
+                if logf:
+                    logf.write(msg + '\n')
+                    logf.flush()
+
             log('===== 任务开始 (触发方式: %s, 运行 ID: %s) =====' % (
                 '手动' if trigger == 'manual' else '定时', run_id))
             log('二进制: %s' % binary)
@@ -1519,9 +1525,9 @@ class TaskRunner:
                 len(top_v6), os.path.basename(v6_txt_path), os.path.basename(v6_yaml_path)))
             log('已生成分源优选结果: %s / %s (每源速度最快 %d 个)' % (
                 os.path.basename(by_source_path), os.path.basename(by_source_yaml_path), per_source_n))
-            # 把最终结果清单打印到日志(可直接查看/复制, 不必下载文件)
+            # 把最终结果清单打印到日志(可直接查看/复制, 不必下载文件; 整块不带时间戳)
             self._log_final_summary(log, record, top_v4, top_v6, source_reports,
-                                    time.time() - t0, settings)
+                                    time.time() - t0, settings, log_raw=log_raw)
             log('===== 任务完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       current_source='', message='成功: IPv4 %d 个 / IPv6 %d 个节点'
@@ -1543,19 +1549,23 @@ class TaskRunner:
                 self._running = False
                 self._proc = None
 
-    def _log_final_summary(self, log, record, top_v4, top_v6, source_reports, elapsed, settings):
+    def _log_final_summary(self, log, record, top_v4, top_v6, source_reports, elapsed, settings, log_raw=None):
         """任务成功结束时把最终结果清单打印到日志
 
         此前日志只有统计摘要, 想看具体入选节点必须下载文件。这里按与输出文件
         完全一致的格式(ip:port#速度-数据中心-位置)逐行打印最终 Top 节点, 便于在
         页面日志里直接查看与复制; 节点过多时按 SUMMARY_MAX_LINES 截断并提示,
         完整内容仍以 results/ 下的输出文件为准。
+
+        整块汇总使用 log_raw(不带时间戳)打印, 使块内各行不被时间前缀切碎, 便于
+        整段复制; 不传 log_raw 时回退为带时间的 log 以保持向后兼容。
         """
-        log('=' * 40)
-        log('最终结果汇总 | 运行 ID %s | 触发方式 %s | 总耗时 %.1f 秒'
+        emit = log_raw or log
+        emit('=' * 40)
+        emit('最终结果汇总 | 运行 ID %s | 触发方式 %s | 总耗时 %.1f 秒'
             % (record.get('id', ''),
                '手动' if record.get('trigger') == 'manual' else '定时', elapsed))
-        log('有效节点 %d 个 -> 提取 IPv4 %d 个 / IPv6 %d 个 (每栈上限 %d)'
+        emit('有效节点 %d 个 -> 提取 IPv4 %d 个 / IPv6 %d 个 (每栈上限 %d)'
             % (record.get('total_nodes', 0), len(top_v4), len(top_v6),
                int(settings.get('top_n') or 20)))
         # 各源执行情况: 成功/失败/测速未达标三种口径
@@ -1566,66 +1576,69 @@ class TaskRunner:
                 status = '失败'
             else:
                 status = '无达标节点'
-            log('  · %s: %s, %d 个节点, 耗时 %.1f 秒, 尝试 %d 次'
+            emit('  · %s: %s, %d 个节点, 耗时 %.1f 秒, 尝试 %d 次'
                 % (r.get('name', '?'), status, r.get('count', 0),
                    float(r.get('elapsed_sec') or 0), r.get('attempts', 1)))
             if r.get('error'):
-                log('      原因: %s' % r['error'])
-        self._log_node_group(log, 'IPv4 Top %d (top_nodes.txt)' % len(top_v4), top_v4)
-        self._log_node_group(log, 'IPv6 Top %d (top_nodes_v6.txt)' % len(top_v6), top_v6)
-        log('输出目录: results/latest/ (top_nodes.* / top_nodes_v6.* / '
+                emit('      原因: %s' % r['error'])
+        self._log_node_group(emit, 'IPv4 Top %d (top_nodes.txt)' % len(top_v4), top_v4)
+        self._log_node_group(emit, 'IPv6 Top %d (top_nodes_v6.txt)' % len(top_v6), top_v6)
+        emit('输出目录: results/latest/ (top_nodes.* / top_nodes_v6.* / '
             'all_sorted*.txt / top_by_source.*)')
-        log('=' * 40)
+        emit('=' * 40)
 
-    def _log_node_group(self, log, title, rows):
+    def _log_node_group(self, log, title, rows, log_raw=None):
         """把一批节点逐行打印到日志, 格式与输出文件一致(ip:port#速度-数据中心-位置);
         行数超过 SUMMARY_MAX_LINES 时截断并提示, 避免日志缓冲被挤满"""
         if not rows:
             return
+        emit = log_raw or log
         lines = ['%s#%s-%s-%s' % (r['ipport'], r['speed_text'],
                                   r['dc'] or 'CF', r['loc'] or 'XX') for r in rows]
-        log('---- %s ----' % title)
+        emit('---- %s ----' % title)
         for ln in lines[:SUMMARY_MAX_LINES]:
-            log(ln)
+            emit(ln)
         if len(lines) > SUMMARY_MAX_LINES:
-            log('  …… 其余 %d 个节点见输出文件' % (len(lines) - SUMMARY_MAX_LINES))
+            emit('  …… 其余 %d 个节点见输出文件' % (len(lines) - SUMMARY_MAX_LINES))
 
     def _log_qa_summary(self, log, run_id, trigger, elapsed, checked, final_rows,
-                        pruned, revived, failed):
+                        pruned, revived, failed, log_raw=None):
         """质检结束时把保留/剔除结果打印到日志(与主任务的结果汇总块风格一致)
 
         保留清单按地址族拆分为 v4 / v6 两段, 与刚重写进 latest 的订阅文件内容一致;
         剔除与回归清单各限行数, 完整明细以上方的逐行日志为准。
+        整块汇总使用 log_raw(不带时间戳)打印, 使块内各行不被时间前缀切碎。
         """
+        emit = log_raw or log
         kept_v4 = [r for r in final_rows if ':' not in r['ip']]
         kept_v6 = [r for r in final_rows if ':' in r['ip']]
-        log('=' * 40)
-        log('质检结果 | 运行 ID %s | 触发方式 %s | 总耗时 %.1f 秒'
+        emit('=' * 40)
+        emit('质检结果 | 运行 ID %s | 触发方式 %s | 总耗时 %.1f 秒'
             % (run_id, '手动' if trigger == 'manual' else '定时', elapsed))
-        log('检查 %d 个 -> 保留 %d 个 (IPv4 %d / IPv6 %d) | 剔除 %d 个 | 回归 %d 个'
+        emit('检查 %d 个 -> 保留 %d 个 (IPv4 %d / IPv6 %d) | 剔除 %d 个 | 回归 %d 个'
             % (checked, len(final_rows), len(kept_v4), len(kept_v6),
                len(pruned or []), len(revived or [])))
-        self._log_node_group(log, '保留节点 IPv4 %d (已写入 top_nodes.txt)' % len(kept_v4), kept_v4)
-        self._log_node_group(log, '保留节点 IPv6 %d (已写入 top_nodes_v6.txt)' % len(kept_v6), kept_v6)
+        self._log_node_group(emit, '保留节点 IPv4 %d (已写入 top_nodes.txt)' % len(kept_v4), kept_v4)
+        self._log_node_group(emit, '保留节点 IPv6 %d (已写入 top_nodes_v6.txt)' % len(kept_v6), kept_v6)
         if pruned:
             failed_set = set(failed or [])
-            log('剔除清单 %d 个 (仍留在基准中, 恢复达标后自动回归):' % len(pruned))
+            emit('剔除清单 %d 个 (仍留在基准中, 恢复达标后自动回归):' % len(pruned))
             for p in pruned[:QA_PRUNE_MAX_LINES]:
                 spd = p.get('speed') or '-'
                 # 未出现在结果文件 = 本次未达标/失联(该行 speed 已置为提示文案, 不再重复原因)
                 if p.get('ipport') in failed_set or spd == '未出现在结果中':
-                    log('  · %s (未出现在结果中)' % p.get('ipport'))
+                    emit('  · %s (未出现在结果中)' % p.get('ipport'))
                 else:
-                    log('  · %s (%s, 低于阈值)' % (p.get('ipport'), spd))
+                    emit('  · %s (%s, 低于阈值)' % (p.get('ipport'), spd))
             if len(pruned) > QA_PRUNE_MAX_LINES:
-                log('  …… 其余 %d 个见上方逐行日志' % (len(pruned) - QA_PRUNE_MAX_LINES))
+                emit('  …… 其余 %d 个见上方逐行日志' % (len(pruned) - QA_PRUNE_MAX_LINES))
         if revived:
             names = [v.get('ipport') for v in revived[:QA_PRUNE_MAX_LINES]]
-            log('回归清单 %d 个 (速度恢复达标, 已重新写回订阅): %s%s'
+            emit('回归清单 %d 个 (速度恢复达标, 已重新写回订阅): %s%s'
                 % (len(revived), '、'.join(names),
                    ' 等' if len(revived) > QA_PRUNE_MAX_LINES else ''))
-        log('订阅文件已重写: results/latest/ (top_nodes.* / top_nodes_v6.*)')
-        log('=' * 40)
+        emit('订阅文件已重写: results/latest/ (top_nodes.* / top_nodes_v6.*)')
+        emit('=' * 40)
 
     def _finish_run_record(self, run_id, status):
         try:
@@ -2332,6 +2345,12 @@ class TaskRunner:
                 logf.write(line + '\n')
                 logf.flush()
 
+        def log_raw(msg):
+            self.log.write(msg)
+            if logf:
+                logf.write(msg + '\n')
+                logf.flush()
+
         try:
             cfg = self.store.get()
             settings = cfg['settings']
@@ -2452,9 +2471,10 @@ class TaskRunner:
             if not final_rows:
                 log('警告: Top 节点本次全部未达标, latest 订阅内容为空, 建议尽快触发一次完整任务')
             # 把质检结果清单打印到日志(保留节点与刚重写的订阅文件一致);
-            # 放在日志最末尾、紧邻结束标记之前, 便于直接在底部查看本轮结果
+            # 放在日志最末尾、紧邻结束标记之前, 便于直接在底部查看本轮结果;
+            # 整块不带时间戳, 块内各行不被时间前缀切碎
             self._log_qa_summary(log, run_id, trigger, time.time() - t0, len(ipports),
-                                 final_rows, pruned, revived, failed)
+                                 final_rows, pruned, revived, failed, log_raw=log_raw)
             log('===== 质检完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
                       message='质检完成: 保留 %d (v4 %d / v6 %d) / 剔除 %d / 回归 %d'
