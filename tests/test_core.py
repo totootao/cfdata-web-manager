@@ -183,6 +183,52 @@ class TestHistoryPool(unittest.TestCase):
                                                 'history_evict_fails': 3})
         self.assertEqual(len(self.pool), 1)
 
+    # ---- 稳定节点(按出现次数) ----
+    def _seed(self, nodes):
+        with self.pool._lock:
+            self.pool._nodes = nodes
+
+    def test_stable_entries_needs_last_run_and_min_hits(self):
+        """稳定节点: 必须本次达标(last_seen==run_id)且出现次数严格 > min_hits"""
+        self._seed({
+            'a:1': {'ipport': 'a:1', 'last_seen': 'r9', 'hits': 12, 'last_speed': 5.0},
+            'b:1': {'ipport': 'b:1', 'last_seen': 'r9', 'hits': 20, 'last_speed': 3.0},
+            'c:1': {'ipport': 'c:1', 'last_seen': 'r8', 'hits': 30, 'last_speed': 9.0},
+            'd:1': {'ipport': 'd:1', 'last_seen': 'r9', 'hits': 10, 'last_speed': 9.0},
+        })
+        out = self.pool.stable_entries('r9', 10)
+        # b(20) > a(12); c 上次未达标排除; d 次数=10 未超过阈值排除
+        self.assertEqual([e['ipport'] for e in out], ['b:1', 'a:1'])
+
+    def test_stable_entries_sorted_by_hits_desc(self):
+        self._seed({
+            'x:1': {'ipport': 'x:1', 'last_seen': 'r9', 'hits': 11, 'last_speed': 1.0},
+            'y:1': {'ipport': 'y:1', 'last_seen': 'r9', 'hits': 50, 'last_speed': 2.0},
+            'z:1': {'ipport': 'z:1', 'last_seen': 'r9', 'hits': 30, 'last_speed': 3.0},
+        })
+        self.assertEqual([e['hits'] for e in self.pool.stable_entries('r9', 10)], [50, 30, 11])
+
+    def test_stable_entries_empty_when_not_last_run(self):
+        self._seed({'a:1': {'ipport': 'a:1', 'last_seen': 'r8', 'hits': 99,
+                            'last_speed': 5.0}})
+        self.assertEqual(self.pool.stable_entries('r9', 10), [])
+
+    def test_stable_entries_hits_accumulate_across_runs(self):
+        """hits 跨轮累加: 第 10 轮 hits=10 未超阈值不入选, 第 11 轮起入选"""
+        cfg = {'speed_min': 5, 'history_pool_capacity': 250,
+               'history_window_runs': 50, 'history_evict_fails': 3}
+        rows = [_row('10.0.0.1:443', '20.00MB/s')]
+        for i in range(1, 11):          # 连续 10 轮达标 -> hits = 10
+            self.pool.update_from_run('r%d' % i, [({'id': 's1', 'name': 'S1'}, rows)],
+                                      None, False, cfg)
+        self.assertEqual(self.pool.stable_entries('r10', 10), [])   # 10 未 > 10
+        self.pool.update_from_run('r11', [({'id': 's1', 'name': 'S1'}, rows)],
+                                  None, False, cfg)
+        out = self.pool.stable_entries('r11', 10)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['ipport'], '10.0.0.1:443')
+        self.assertEqual(out[0]['hits'], 11)
+
     def test_persistence(self):
         self.pool.update_from_run('r1', [({'id': 's1', 'name': 'S1'}, self._mk(4))],
                                   None, False, {'speed_min': 5, 'history_pool_capacity': 250,

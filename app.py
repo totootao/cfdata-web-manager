@@ -247,6 +247,9 @@ DEFAULT_CONFIG = {
         'binary_path': '',          # 留空则自动检测
         'top_n': 20,                # 提取前 N 个节点(全局合并排序后)
         'per_source_top_n': 5,      # 每个源单独提取速度最快的前 N 个节点(输出 top_by_source.txt)
+        # 稳定节点(latest/top_stable.*): 入选需同时满足 ①本次全量任务复测达标
+        # ②累计出现次数严格大于该值(默认 10, 即至少 11 次); 按出现次数降序取前 top_n
+        'stable_min_hits': 10,
         'source_retries': 3,        # 源执行失败(退出码非 0/异常)自动重试次数(0 = 不重试; 测速未达标不重试)
         'source_retry_delay': 5,    # 重试间隔秒数
         # ---- 历史节点复测 ----
@@ -791,6 +794,36 @@ class HistoryPool:
                     item['best_speed_text'] = '-'
                 out.append(item)
             return out
+
+    def stable_entries(self, run_id, min_hits=10):
+        """返回"本次全量任务达标 且 出现次数 > min_hits"的节点(按出现次数降序)
+
+        判定口径(两者同时满足):
+          ① last_seen == run_id —— 该节点在本次全量任务中复测达标("上一次全量任务测试通过")
+          ② hits > min_hits     —— 累计达标次数严格大于阈值("出现次数超过 N 次")
+        hits 只在节点留在池中时累加, 受滚动窗口影响: 节点连续缺席超过 history_window_runs
+        轮会被清出池, 再次出现时 hits 从 1 重新计数。
+        排序: 出现次数降序 → 最近速度降序 → ipport 升序(保证顺序稳定可复现)。
+        """
+        try:
+            min_hits = int(min_hits)
+        except (TypeError, ValueError):
+            min_hits = 10
+        with self._lock:
+            out = []
+            for e in self._nodes.values():
+                if str(e.get('last_seen') or '') != str(run_id):
+                    continue
+                hits = int(e.get('hits') or 0)
+                if hits <= min_hits:
+                    continue
+                item = dict(e)
+                item['hits'] = hits
+                out.append(item)
+        out.sort(key=lambda e: (-e['hits'],
+                                -float(e.get('last_speed') or 0),
+                                e.get('ipport') or ''))
+        return out
 
     def stats(self):
         with self._lock:
@@ -1467,6 +1500,14 @@ class TaskRunner:
                             h['evicted'], h['expired'], h['dropped']))
                 except Exception as e:
                     log('历史节点池更新失败: %s' % e)
+            # ---- 稳定节点(按出现次数) ----
+            # 必须在历史池更新之后生成: 此时"上一次全量任务"就是刚跑完的这一轮,
+            # 池内 last_seen == run_id 才等价于"本次全量任务测试通过"
+            try:
+                self._write_stable_latest(run_id, settings, api_results,
+                                          history_rows, log)
+            except Exception as e:
+                log('稳定节点文件生成失败: %s' % e)
             log('已保存 IPv4 %d 个节点: %s / %s; IPv6 %d 个节点: %s / %s (双栈分开输出)' % (
                 len(top_v4), os.path.basename(txt_path), os.path.basename(yaml_path),
                 len(top_v6), os.path.basename(v6_txt_path), os.path.basename(v6_yaml_path)))
@@ -2026,6 +2067,81 @@ class TaskRunner:
                 'top_by_source.* / qa_input.txt)')
         except Exception as e:
             log('同步 latest 目录失败: %s' % e)
+
+    # ---- 稳定节点(按出现次数) ----
+    def _write_stable_latest(self, run_id, settings, api_results, history_rows, log):
+        """按出现次数提取稳定节点, 写入 results/latest/top_stable.*
+
+        入选需同时满足: ①本次全量任务复测达标(池内 last_seen == 本轮 run_id)
+        ②累计出现次数 > stable_min_hits(默认 10, 即至少 11 次)。
+        按出现次数降序, IPv4 / IPv6 分开输出, 各取前 top_n 个, 命名与 top_nodes 系列一致。
+
+        无符合条件、或某个协议族为空时保留上次文件不动, 避免把订阅清空。
+        """
+        try:
+            min_hits = int(settings.get('stable_min_hits') or 10)
+        except (TypeError, ValueError):
+            min_hits = 10
+        entries = HISTORY.stable_entries(run_id, min_hits)
+        if not entries:
+            log('稳定节点: 本轮无节点满足"本次全量任务达标 且 出现次数 > %d", '
+                '保留上次 top_stable.* 文件' % min_hits)
+            return
+        # 本轮实测行(ipport -> row): 补全 dc/loc/速度等字段, 复用统一的节点命名与 YAML 输出
+        row_by_key = {}
+        for _src, rows in (api_results or []):
+            for r in rows:
+                row_by_key[r['ipport']] = r
+        for r in (history_rows or []):
+            row_by_key.setdefault(r['ipport'], r)
+
+        top_n = max(1, int(settings.get('top_n') or 20))
+        node_cfg = settings.get('node', {})
+        v4, v6, missing = [], [], 0
+        for e in entries:
+            if len(v4) >= top_n and len(v6) >= top_n:
+                break
+            row = row_by_key.get(e.get('ipport'))
+            if row is None:      # 极少数: 池内记录与本轮结果行未对上
+                missing += 1
+                continue
+            if ':' in row['ip']:
+                if len(v6) < top_n:
+                    v6.append(row)
+            else:
+                if len(v4) < top_n:
+                    v4.append(row)
+
+        written = []
+        for rows, txt_name, yaml_name in ((v4, 'top_stable.txt', 'top_stable.yaml'),
+                                          (v6, 'top_stable_v6.txt', 'top_stable_v6.yaml')):
+            if not rows:
+                continue         # 该协议族无节点: 保留上次文件, 不写空订阅
+            os.makedirs(LATEST_DIR, exist_ok=True)
+            txt_path = os.path.join(LATEST_DIR, txt_name)
+            tmp = txt_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                for r in rows:
+                    f.write('%s#%s-%s-%s\n' % (r['ipport'], r['speed_text'],
+                                               r['dc'] or 'CF', r['loc'] or 'XX'))
+            os.replace(tmp, txt_path)
+            used = set()
+            yaml_path = os.path.join(LATEST_DIR, yaml_name)
+            tmp = yaml_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write('proxies:\n')
+                for r in rows:
+                    self._yaml_node(f, r, self._node_name(r, settings, used), node_cfg)
+            os.replace(tmp, yaml_path)
+            written.append('%s / %s (%d 个)' % (txt_name, yaml_name, len(rows)))
+
+        if written:
+            log('稳定节点(出现次数 > %d 且本次全量任务达标): 已写入 latest/ — %s '
+                '(按出现次数降序, 各取前 %d%s)' % (
+                    min_hits, '; '.join(written), top_n,
+                    '; %d 个池内节点未匹配到本轮结果行已跳过' % missing if missing else ''))
+        else:
+            log('稳定节点: 未写入任何文件(本轮结果行缺失), 保留上次 top_stable.* 文件')
 
     def _write_outputs(self, run_dir, top_v4, top_v6, merged, per_source_top, settings, log):
         """生成结果文件: IPv4 与 IPv6 分开输出
