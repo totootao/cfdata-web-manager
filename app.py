@@ -266,6 +266,8 @@ DEFAULT_CONFIG = {
         'official_v6_enabled': False,   # 作为附加伪源扫描 Cloudflare 官方 IPv6 地址库(-mode=official -offiptype=6)
         'official_v6_count': 20,        # -offspeedlimit 官方模式测速达标结果上限(达标即停止)
         'official_v6_delay': 500,       # -offdelay 官方模式延迟阈值(毫秒), 超过剔除
+        # ---- 质检 ----
+        'qa_min_write_count': 5,    # 质检结果少于该数量时不写入 latest 订阅文件(保持原样, 防抖动打空); 0=不限制
         # ---- FlClash 订阅模板转换 ----
         'sub_convert_enabled': False,   # 把 latest 的 top_nodes.yaml / top_nodes_v6.yaml 按模板转为完整 Clash 订阅
         'sub_convert_url': '',          # 订阅模板链接(完整 Clash 配置; 其节点列表将被平台实测 Top 节点替换, 规则/策略组保留)
@@ -1125,6 +1127,21 @@ def resolve_qa_speedtest_threads(settings):
         return int(settings.get('speedtest_threads') or 5)
     except (TypeError, ValueError):
         return 5
+
+
+def resolve_qa_min_write_count(settings):
+    """质检结果写入 latest 的数量下限
+
+    低于该数量时不重写 latest 订阅文件(保持原样), 避免网络抖动等异常造成本轮
+    大面积未达标时把订阅打空 —— 节点仍留在 qa_input 基准里, 下轮达标自动回归。
+    0 = 不限制(总是写入)。非法值回退为默认 5。
+    """
+    raw = settings.get('qa_min_write_count')
+    try:
+        v = int(raw) if raw not in (None, '') else 5
+    except (TypeError, ValueError):
+        v = 5
+    return max(0, v)
 
 
 # ---------------------------------------------------------------- 任务执行器
@@ -2468,7 +2485,18 @@ class TaskRunner:
                 log('回归: %s (本次 %s, 速度已恢复达标, 重新写回订阅文件)' % (v['ipport'], v['speed']))
 
             # 只重写 latest 的 Top 文件(IPv4/IPv6 分开写; 分源/全量文件保留原样)
-            kept_v4_n, kept_v6_n, sub_conv = self._rewrite_latest_top(final_rows, settings, log)
+            # 结果过少时不写: 网络抖动等异常可能造成本轮大面积未达标, 直接重写会把订阅打空
+            min_write = resolve_qa_min_write_count(settings)
+            kept_v4_n = len([r for r in final_rows if ':' not in r['ip']])
+            kept_v6_n = len([r for r in final_rows if ':' in r['ip']])
+            written = len(final_rows) >= min_write
+            if written:
+                kept_v4_n, kept_v6_n, sub_conv = self._rewrite_latest_top(final_rows, settings, log)
+            else:
+                sub_conv = []
+                log('质检结果仅 %d 个(IPv4 %d / IPv6 %d), 低于写入下限 %d: '
+                    '不写入 latest 订阅文件, 保持原样(节点仍在质检基准中, 下轮达标自动回归)'
+                    % (len(final_rows), kept_v4_n, kept_v6_n, min_write))
 
             prev_meta = load_latest_meta() or {}
             info = {
@@ -2479,6 +2507,8 @@ class TaskRunner:
                 'pruned': [{'ipport': p['ipport'], 'speed': p['speed']} for p in pruned],
                 'revived': [{'ipport': v['ipport'], 'speed': v['speed']} for v in revived],
                 'source_run_id': prev_meta.get('run_id', ''),
+                'written': written,          # False = 结果低于下限, latest 未重写
+                'min_write_count': min_write,
                 'sub_converted': sub_conv,
                 'failed': failed,
             }
@@ -2487,14 +2517,17 @@ class TaskRunner:
                             'finished_at': now_str(), 'status': 'success',
                             'checked': len(ipports), 'kept': len(kept),
                             'kept_v4': kept_v4_n, 'kept_v6': kept_v6_n,
+                            'written': written, 'min_write_count': min_write,
                             'pruned_count': len(pruned), 'revived_count': len(revived),
                             'pruned': [p['ipport'] for p in pruned],
                             'revived': [v['ipport'] for v in revived],
                             'latest_run_id': prev_meta.get('run_id', ''), 'error': ''})
             log('质检完成: 检查 %d 个, 保留 %d 个(IPv4 %d / IPv6 %d), 剔除 %d 个(其中 %d 个未出现在结果中), '
-                '回归 %d 个 (latest 已重写, 运行历史/历史池未动)'
+                '回归 %d 个 (%s, 运行历史/历史池未动)'
                 % (len(ipports), len(kept), kept_v4_n, kept_v6_n,
-                   len(pruned), len(failed), len(revived)))
+                   len(pruned), len(failed), len(revived),
+                   'latest 已重写' if written
+                   else 'latest 未写入(结果 %d 个 < 下限 %d, 保持原样)' % (len(final_rows), min_write)))
             if not final_rows:
                 log('警告: Top 节点本次全部未达标, latest 订阅内容为空, 建议尽快触发一次完整任务')
             # 把质检结果清单打印到日志(保留节点与刚重写的订阅文件一致);
@@ -2504,9 +2537,11 @@ class TaskRunner:
                                  final_rows, pruned, revived, failed, log_raw=log_raw)
             log('===== 质检完成 =====')
             self._set(phase='done', running=False, finished_at=now_str(),
-                      message='质检完成: 保留 %d (v4 %d / v6 %d) / 剔除 %d / 回归 %d'
+                      message='质检完成: 保留 %d (v4 %d / v6 %d) / 剔除 %d / 回归 %d%s'
                               % (len(final_rows), kept_v4_n, kept_v6_n,
-                                 len(pruned), len(revived)))
+                                 len(pruned), len(revived),
+                                 '' if written
+                                 else ' [结果 < 下限 %d, latest 未写入]' % min_write))
         except _CanceledError:
             msg = '质检已取消, latest 保持原样'
             log(msg)

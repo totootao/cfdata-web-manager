@@ -409,6 +409,33 @@ class TestQaSpeedThreads(unittest.TestCase):
                       runner._build_cmd('/bin/cfdata', settings, 'o.csv', input_name='i.txt'))
 
 
+class TestQaMinWriteCount(unittest.TestCase):
+    """质检结果写入下限: 保留数少于该值时不重写 latest 订阅文件"""
+
+    def test_default_is_five(self):
+        for raw in (None, ''):
+            self.assertEqual(app.resolve_qa_min_write_count(
+                {'qa_min_write_count': raw}), 5, raw)
+        self.assertEqual(app.resolve_qa_min_write_count({}), 5)
+
+    def test_custom_value(self):
+        self.assertEqual(app.resolve_qa_min_write_count({'qa_min_write_count': 3}), 3)
+        self.assertEqual(app.resolve_qa_min_write_count({'qa_min_write_count': '10'}), 10)
+
+    def test_zero_means_no_limit(self):
+        self.assertEqual(app.resolve_qa_min_write_count({'qa_min_write_count': 0}), 0)
+
+    def test_invalid_falls_back(self):
+        self.assertEqual(app.resolve_qa_min_write_count({'qa_min_write_count': 'abc'}), 5)
+        self.assertEqual(app.resolve_qa_min_write_count({'qa_min_write_count': -3}), 0)
+
+    def test_write_decision(self):
+        """低于下限不写、达到下限才写(与 _run_qa 内判定一致)"""
+        self.assertFalse(3 >= app.resolve_qa_min_write_count({'qa_min_write_count': 5}))
+        self.assertTrue(5 >= app.resolve_qa_min_write_count({'qa_min_write_count': 5}))
+        self.assertTrue(1 >= app.resolve_qa_min_write_count({'qa_min_write_count': 0}))
+
+
 class TestAuth(unittest.TestCase):
     """可选 Basic 认证: 未配置时放行, 配置后校验; 令牌仅用于下载路径"""
 
