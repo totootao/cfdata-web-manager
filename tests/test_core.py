@@ -379,6 +379,36 @@ class TestNodeNameLang(unittest.TestCase):
             self.assertEqual(name, '香港-%s-42.41MB/s' % zh, name)
 
 
+class TestQaSpeedThreads(unittest.TestCase):
+    """质检测速并发可独立配置; 未设置 / 0 / 非法值时沿用主任务(老配置行为不变)"""
+
+    def test_fallback_to_main(self):
+        for qa in (None, 0, '', 'abc', -1):
+            self.assertEqual(app.resolve_qa_speedtest_threads(
+                {'speedtest_threads': 8, 'qa_speedtest_threads': qa}), 8, qa)
+
+    def test_qa_override(self):
+        self.assertEqual(app.resolve_qa_speedtest_threads(
+            {'speedtest_threads': 8, 'qa_speedtest_threads': 3}), 3)
+        self.assertEqual(app.resolve_qa_speedtest_threads(
+            {'speedtest_threads': 8, 'qa_speedtest_threads': '12'}), 12)
+
+    def test_default_when_missing(self):
+        self.assertEqual(app.resolve_qa_speedtest_threads({}), 5)
+        self.assertEqual(app.resolve_qa_speedtest_threads({'speedtest_threads': 0}), 5)
+
+    def test_build_cmd_uses_own_threads(self):
+        """质检用独立值(-nsbspeedtest=3), 主任务仍用自己的值(8)"""
+        runner = app.TaskRunner(app.STORE)
+        settings = {'speedtest_threads': 8, 'qa_speedtest_threads': 3}
+        qa_settings = dict(settings)
+        qa_settings['speedtest_threads'] = app.resolve_qa_speedtest_threads(settings)
+        self.assertIn('-nsbspeedtest=3',
+                      runner._build_cmd('/bin/cfdata', qa_settings, 'o.csv', input_name='i.txt'))
+        self.assertIn('-nsbspeedtest=8',
+                      runner._build_cmd('/bin/cfdata', settings, 'o.csv', input_name='i.txt'))
+
+
 class TestAuth(unittest.TestCase):
     """可选 Basic 认证: 未配置时放行, 配置后校验; 令牌仅用于下载路径"""
 

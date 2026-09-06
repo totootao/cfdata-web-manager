@@ -359,6 +359,8 @@ h1,.sub,.stat .v{overflow-wrap:anywhere}
       <div class="desc">对应 cfdata 命令行参数，任务执行时逐项传入</div>
       <div class="grid g3">
         <div class="field"><label>测速线程数 (-nsbspeedtest)</label><input type="number" id="sSpeedThreads" min="0" step="1"></div>
+        <div class="field"><label>质检独立测速线程数</label><input type="number" id="sQaSpeedThreads" min="0" step="1" placeholder="留空=沿用主任务">
+          <div class="hint">只对质检任务生效；留空或填 0 则沿用上方主任务值。质检复测节点少，可调低避免把带宽打满导致速度偏低</div></div>
         <div class="field"><label>最低速度 MB/s (-nsbspeedmin)</label><input type="number" id="sSpeedMin" min="0" step="0.1"></div>
         <div class="field"><label>测速上限 (-nsbspeedlimit)</label><input type="number" id="sSpeedLimit" min="0" step="1">
           <div class="hint">达标结果数上限；9999=不限制。设小（如 50）达标够数后提前结束</div></div>
@@ -828,6 +830,7 @@ async function loadSettings(){
   try{
     const j = await api('/api/settings'); const s = j.data, n = s.node||{};
     $('sSpeedThreads').value=s.speedtest_threads; $('sSpeedMin').value=s.speed_min;
+    $('sQaSpeedThreads').value=(s.qa_speedtest_threads===0||s.qa_speedtest_threads==null)?'':s.qa_speedtest_threads;
     $('sSpeedLimit').value=s.speed_limit; $('sResultLimit').value=s.result_limit;
     $('sThreads').value=s.threads; $('sIpType').value=s.ip_type; $('sTopN').value=s.top_n;
     $('sPerSourceN').value=s.per_source_top_n??5;
@@ -858,6 +861,7 @@ async function loadSettings(){
 async function saveSettings(){
   const body = {
     speedtest_threads:+$('sSpeedThreads').value, speed_min:+$('sSpeedMin').value,
+    qa_speedtest_threads:+$('sQaSpeedThreads').value||0,
     speed_limit:+$('sSpeedLimit').value, result_limit:+$('sResultLimit').value,
     threads:+$('sThreads').value, ip_type:$('sIpType').value, top_n:+$('sTopN').value,
     per_source_top_n:Math.max(1, +$('sPerSourceN').value||5),

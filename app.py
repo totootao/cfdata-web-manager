@@ -1105,6 +1105,28 @@ class LogBuffer:
             return [(s, l) for s, l in self._lines if s > after]
 
 
+def resolve_qa_speedtest_threads(settings):
+    """质检任务的测速并发(-nsbspeedtest)
+
+    质检复测的节点集合远小于主任务(仅 latest 的原始 Top 列表), 用主任务的并发值
+    常常过高(把带宽打满导致速度偏低)或过低(质检拖太久), 因此支持单独配置:
+      qa_speedtest_threads > 0  -> 用该值
+      未设置 / 0 / 非法值        -> 沿用主任务 speedtest_threads(默认 5)
+    这样已部署的配置在升级后行为不变(没有该键时自动回退)。
+    """
+    raw = settings.get('qa_speedtest_threads')
+    try:
+        v = int(raw) if raw not in (None, '') else 0
+    except (TypeError, ValueError):
+        v = 0
+    if v > 0:
+        return v
+    try:
+        return int(settings.get('speedtest_threads') or 5)
+    except (TypeError, ValueError):
+        return 5
+
+
 # ---------------------------------------------------------------- 任务执行器
 class TaskRunner:
     def __init__(self, store: ConfigStore):
@@ -2397,7 +2419,12 @@ class TaskRunner:
 
             out_name = 'qa.csv'
             out_path = os.path.join(work_dir, out_name)
-            cmd = self._build_cmd(binary, settings, out_name, input_name=input_name)
+            # 质检测速并发可独立配置(qa_speedtest_threads); 未设置时沿用主任务值
+            qa_threads = resolve_qa_speedtest_threads(settings)
+            qa_settings = dict(settings)
+            qa_settings['speedtest_threads'] = qa_threads
+            cmd = self._build_cmd(binary, qa_settings, out_name, input_name=input_name)
+            log('质检测速: %d 个节点, %d 线程并发 (-nsbspeedtest)' % (len(ipports), qa_threads))
             rows, code, err = self._exec_cmd(cmd, work_dir, out_path, settings, log, '质检')
             if self._cancel:
                 raise _CanceledError()
