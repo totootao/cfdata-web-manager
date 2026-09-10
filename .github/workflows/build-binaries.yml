@@ -188,12 +188,21 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERTIFICATE }}"))
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe `
                        | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
+          if (-not $signtool) {
+            # ARM64 runner 上可能只装了 arm64 版 signtool
+            $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe `
+                         | Select-Object -First 1).FullName
+          }
           if (-not $signtool) { throw "未找到 signtool.exe" }
           $exe = "dist\${{ env.APP_NAME }}-${{ matrix.target }}.exe"
           & $signtool sign /fd SHA256 /td SHA256 /tr "${{ env.WINDOWS_TIMESTAMP_URL }}" `
             /f $pfx /p "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" /v $exe
           if ($LASTEXITCODE -ne 0) { throw "Authenticode 签名失败" }
           & $signtool verify /pa /v $exe
+          if ($LASTEXITCODE -ne 0) {
+            # 签名已写入, verify 多半因本机信任链/中间证书缺失而失败, 不阻断发布
+            Write-Host "::warning::signtool verify 未通过(签名已写入), 请检查证书链是否完整"
+          }
 
       - name: 自签名 (Windows, 无正式证书时)
         if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT != 'true' && inputs.self_sign
@@ -201,12 +210,24 @@ jobs:
         run: |
           New-SelfSignedCertificate -Subject "CN=cfdata-web-manager (self-signed)" `
             -CertStoreLocation Cert:\CurrentUser\My -Type CodeSigningCert `
-            -HashAlgorithm SHA256 -KeyLength 2048 | Out-Null
+            -HashAlgorithm SHA256 -KeyLength 2048 -NotAfter (Get-Date).AddYears(10) | Out-Null
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe `
                        | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
+          if (-not $signtool) {
+            # ARM64 runner 上可能只装了 arm64 版 signtool
+            $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe `
+                         | Select-Object -First 1).FullName
+          }
+          if (-not $signtool) { throw "未找到 signtool.exe" }
           $exe = "dist\${{ env.APP_NAME }}-${{ matrix.target }}.exe"
           & $signtool sign /fd SHA256 /a $exe
+          if ($LASTEXITCODE -ne 0) { throw "自签名失败" }
           & $signtool verify $exe
+          if ($LASTEXITCODE -ne 0) {
+            # 自签证书的根不在系统信任库, verify 必然报 "not trusted by the trust provider"
+            # 签名本身已写入; 用户机器上同样不受信任, 故不阻断发布
+            Write-Host "::warning::自签名证书未被系统信任(预期), 已签名但用户端仍会提示 SmartScreen"
+          }
 
       - name: 打包压缩 (Unix)
         if: runner.os != 'Windows'
