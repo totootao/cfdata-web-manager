@@ -8,10 +8,14 @@ permissions:
 
 jobs:
   probe:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - name: 准备诊断文件
+        run: |
+          echo "host: $(uname -a)" > diag-freebsd.log
+          echo "runner.os: ${{ runner.os }} / arch: ${{ runner.arch }}" >> diag-freebsd.log
 
       - name: FreeBSD 内诊断
         uses: vmactions/freebsd-vm@v1
@@ -39,7 +43,7 @@ jobs:
               echo "build exit=$?"
               echo "=== dist ==="
               ls -la dist 2>&1
-            } > diag-freebsd.log 2>&1 || true
+            } >> diag-freebsd.log 2>&1 || true
 
       - name: 推送诊断
         if: always()
@@ -47,6 +51,7 @@ jobs:
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
           git checkout -B ci-diag-freebsd
+          [ -f diag-freebsd.log ] || echo "(FreeBSD VM 未启动, 无日志)" > diag-freebsd.log
           git add -f diag-freebsd.log
           git commit -m "diag: freebsd $(date -u +%FT%TZ)" || exit 0
           git push -f origin ci-diag-freebsd
