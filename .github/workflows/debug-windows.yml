@@ -1,0 +1,61 @@
+name: Debug Windows Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  debug:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+
+      - name: 诊断构建
+        shell: pwsh
+        run: |
+          $log = "$pwd\diag.txt"
+          function W($m) { Add-Content -Path $log -Value $m }
+          $ErrorActionPreference = 'Continue'
+          "=== 环境 ===" | Out-File $log
+          W ("python: " + (Get-Command python).Source)
+          W ("version: " + ((python -V 2>&1) | Out-String))
+          W ("arch: " + $env:PROCESSOR_ARCHITECTURE)
+          $pip = (pip install --upgrade pyinstaller 2>&1 | Out-String)
+          W "=== pip install ==="; W $pip
+          try {
+            Add-MpPreference -ExclusionPath $pwd.Path -ErrorAction Stop
+            W "Defender 排除已添加"
+          } catch {
+            W ("Defender 排除失败: " + $_.Exception.Message)
+          }
+          $out = (python -m PyInstaller --onefile --clean --noconfirm --name app-debug --add-data "web;web" app.py 2>&1 | Out-String)
+          W "=== PyInstaller 退出码: $LASTEXITCODE ==="
+          W $out
+          W "=== dist 目录 ==="
+          W ((Get-ChildItem dist -Force -ErrorAction SilentlyContinue | Out-String))
+          $exe = "dist\app-debug.exe"
+          if (Test-Path $exe) {
+            $o = (& $exe --help 2>&1 | Out-String)
+            W "=== 冒烟退出码: $LASTEXITCODE ==="
+            W $o
+          } else {
+            W "exe 不存在"
+          }
+
+      - name: 推送诊断日志
+        if: always()
+        shell: bash
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git checkout -B ci-diag
+          git add -f diag.txt
+          git commit -m "diag: windows build $(date -u +%FT%TZ)"
+          git push -f origin ci-diag
