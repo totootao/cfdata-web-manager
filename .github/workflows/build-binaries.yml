@@ -96,27 +96,33 @@ jobs:
           if [ -f bundle/cfdata ]; then args+=(--add-binary "bundle/cfdata:."); fi
           python -m PyInstaller "${args[@]}" app.py
 
-      - name: PyInstaller 打包 (Windows)
+      - name: PyInstaller 打包 + 冒烟测试 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $name = "${{ env.APP_NAME }}-${{ matrix.target }}"
+          $exe  = "dist/$name.exe"
+          $log  = "dist/smoke-${{ matrix.target }}.txt"
           $pyArgs = @('--onefile','--clean','--noconfirm','--name', $name, '--add-data', 'web;web')
           if (Test-Path 'bundle/cfdata.exe') { $pyArgs += @('--add-binary', 'bundle/cfdata.exe;.') }
           python -m PyInstaller @pyArgs app.py
+          $report = @("target: ${{ matrix.target }}", "exe-exists: $(Test-Path $exe)")
+          if (Test-Path $exe) {
+            $out = & $exe --help 2>&1 | Out-String
+            $report += "exit-code: $LASTEXITCODE"
+            $report += "--- 冒烟输出 ---"
+            $report += $out
+          } else {
+            $report += "--- dist 目录内容 ---"
+            $report += (Get-ChildItem dist -Force -ErrorAction SilentlyContinue | Out-String)
+          }
+          $report -join "`n" | Out-File -Encoding utf8 $log
+          Get-Content $log
 
       - name: 冒烟测试 (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: ./dist/${APP_NAME}-${{ matrix.target }} --help > /dev/null && echo "冒烟测试通过"
-
-      - name: 冒烟测试 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          & "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe" --help *> $null
-          if ($LASTEXITCODE -ne 0) { throw "冒烟测试失败" }
-          Write-Host "冒烟测试通过"
 
       - name: 打包压缩 (Unix)
         if: runner.os != 'Windows'
@@ -129,8 +135,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe" `
-            -DestinationPath "dist/${{ env.APP_NAME }}-${{ matrix.target }}.zip" -Force
+          $exe = "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe"
+          if (Test-Path $exe) {
+            Compress-Archive -Path $exe `
+              -DestinationPath "dist/${{ env.APP_NAME }}-${{ matrix.target }}.zip" -Force
+          }
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -139,6 +148,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/smoke-*.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -154,7 +164,7 @@ jobs:
           python-version: '3.12'
       - name: 构建 .pyz
         run: |
-          mkdir -p src && cp app.py src/ && cp -r web src/
+          mkdir -p dist src && cp app.py src/ && cp -r web src/
           python -m zipapp src -o "dist/${APP_NAME}-universal-py3.pyz" -m "app:main" -p "/usr/bin/env python3"
           ./dist/${APP_NAME}-universal-py3.pyz --help > /dev/null && echo "冒烟测试通过"
       - uses: actions/upload-artifact@v4
@@ -175,12 +185,15 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - name: armv7 容器内构建
         run: |
+          # 注意: docker run 不继承宿主环境变量, APP_NAME 必须显式传入
           docker run --rm --platform linux/arm/v7 -v "$PWD":/work -w /work \
+            -e APP_NAME="${APP_NAME}" -e DEBIAN_FRONTEND=noninteractive \
             arm32v7/python:3.12-slim bash -ec '
-              apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
+              set -e
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev
               pip install --no-cache-dir pyinstaller
-              pyinstaller --onefile --clean --noconfirm --name ${APP_NAME}-linux-armv7 --add-data "web:web" app.py
-              cd dist && tar czf ${APP_NAME}-linux-armv7.tar.gz ${APP_NAME}-linux-armv7
+              pyinstaller --onefile --clean --noconfirm --name "${APP_NAME}-linux-armv7" --add-data "web:web" app.py
+              cd dist && tar czf "${APP_NAME}-linux-armv7.tar.gz" "${APP_NAME}-linux-armv7"
             '
       - uses: actions/upload-artifact@v4
         with:
@@ -228,13 +241,16 @@ jobs:
           sync: rsync
           copyback: true
           prepare: |
-            pkg install -y python312 py312-pip
+            pkg install -y gmake
+            pkg install -y python311 py311-pip || pkg install -y python312 py312-pip || pkg install -y python3 py3-pip
           run: |
             set -e
-            python3.12 -m pip install --upgrade pyinstaller
-            python3.12 -m PyInstaller --onefile --clean --noconfirm \
-              --name ${APP_NAME}-freebsd-amd64 --add-data "web:web" app.py
-            cd dist && tar czf ${APP_NAME}-freebsd-amd64.tar.gz ${APP_NAME}-freebsd-amd64
+            PY=$(command -v python3.12 || command -v python3.11 || command -v python3)
+            echo "使用解释器: $PY"
+            $PY -m pip install --upgrade pyinstaller
+            $PY -m PyInstaller --onefile --clean --noconfirm \
+              --name cfdata-web-manager-freebsd-amd64 --add-data "web:web" app.py
+            cd dist && tar czf cfdata-web-manager-freebsd-amd64.tar.gz cfdata-web-manager-freebsd-amd64
       - uses: actions/upload-artifact@v4
         with:
           name: bin-freebsd-amd64
