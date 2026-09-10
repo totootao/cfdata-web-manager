@@ -221,7 +221,8 @@ jobs:
   # ---------- FreeBSD amd64 (实验, FreeBSD 虚拟机构建) ----------
   freebsd-amd64:
     name: 构建 freebsd-amd64 (实验)
-    runs-on: macos-15
+    # 必须在 x86_64 Linux 运行器上跑: Apple Silicon(macos-15) 无法启动 amd64 FreeBSD 虚拟机
+    runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 90
     steps:
@@ -234,11 +235,13 @@ jobs:
           copyback: true
           prepare: |
             pkg install -y gmake
-            pkg install -y python311 py311-pip || pkg install -y python312 py312-pip || pkg install -y python3 py3-pip
           run: |
             set -e
             PY=$(command -v python3.12 || command -v python3.11 || command -v python3)
-            echo "使用解释器: $PY"
+            VER=$($PY -c 'import sys; print("%d%d" % sys.version_info[:2])')
+            echo "使用解释器: $PY (py$VER)"
+            # FreeBSD 无 manylinux wheel, pip 需匹配当前 python 版本; 找不到时回退 ensurepip
+            pkg install -y "py${VER}-pip" 2>/dev/null || $PY -m ensurepip --upgrade 2>/dev/null || true
             $PY -m pip install --upgrade pyinstaller
             $PY -m PyInstaller --onefile --clean --noconfirm \
               --name cfdata-web-manager-freebsd-amd64 --add-data "web:web" app.py
@@ -320,16 +323,6 @@ jobs:
           ec=${PIPESTATUS[0]}
           echo "gh exit=$ec" | tee -a ../gh.out
           exit $ec
-
-      - name: 推送发布失败诊断
-        if: failure()
-        run: |
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git checkout -B ci-diag
-          git add -f gh.out
-          git commit -m "diag: release-fail $(date -u +%FT%TZ)" || exit 0
-          git push -f origin ci-diag
 
       - name: 写入构建摘要
         run: |
