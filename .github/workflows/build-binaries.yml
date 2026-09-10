@@ -258,6 +258,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+
       - name: 汇集全部产物
         uses: actions/download-artifact@v4
         with:
@@ -295,6 +297,7 @@ jobs:
           } > ../notes.md
 
       - name: 发布到 GitHub Release
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -307,9 +310,26 @@ jobs:
             TAG="binaries"
             EXTRA_FLAGS="--prerelease"
             TITLE="多平台二进制 (最新构建)"
-            gh release delete "$TAG" --cleanup-tag -y 2>/dev/null || true
+            echo "=== 删除旧 release ===" | tee -a ../gh.out
+            gh release delete "$TAG" --cleanup-tag -y 2>&1 | tee -a ../gh.out || true
           fi
-          gh release create "$TAG" ./* --title "$TITLE" --notes-file ../notes.md $EXTRA_FLAGS
+          echo "=== dist 内容 ===" | tee -a ../gh.out
+          ls -la | tee -a ../gh.out
+          set +e
+          gh release create "$TAG" ./* --title "$TITLE" --notes-file ../notes.md $EXTRA_FLAGS 2>&1 | tee -a ../gh.out
+          ec=${PIPESTATUS[0]}
+          echo "gh exit=$ec" | tee -a ../gh.out
+          exit $ec
+
+      - name: 推送发布失败诊断
+        if: failure()
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git checkout -B ci-diag
+          git add -f gh.out
+          git commit -m "diag: release-fail $(date -u +%FT%TZ)" || exit 0
+          git push -f origin ci-diag
 
       - name: 写入构建摘要
         run: |
