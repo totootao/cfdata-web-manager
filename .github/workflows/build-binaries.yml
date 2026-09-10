@@ -336,12 +336,24 @@ jobs:
       image: python:3.12-alpine
     steps:
       - name: 安装构建依赖
-        run: apk add --no-cache git build-base binutils patchelf
+        run: apk add --no-cache git build-base binutils patchelf curl
       - uses: actions/checkout@v4
+      # 官方 Go 版 cfdata 是静态链接(CGO_ENABLED=0), 不依赖 glibc, 在 musl/Alpine 上可直接运行
+      - name: 下载官方 cfdata (静态链接)
+        run: |
+          mkdir -p bundle
+          curl -fsSL --retry 3 -o bundle/cfdata \
+            "https://github.com/${CFDATA_REPO}/releases/latest/download/cfdata-linux-amd64" \
+            || rm -f bundle/cfdata
+          if [ -f bundle/cfdata ]; then chmod +x bundle/cfdata; ls -la bundle/; fi
       - name: 构建
         run: |
           pip install --no-cache-dir pyinstaller
-          pyinstaller --onefile --clean --noconfirm --name ${APP_NAME}-linux-musl-amd64 --add-data "web:web" app.py
+          # alpine 镜像默认 shell 为 ash, 不用 bash 数组语法
+          EXTRA=""
+          if [ -f bundle/cfdata ]; then EXTRA="--add-binary bundle/cfdata:."; fi
+          pyinstaller --onefile --clean --noconfirm --name ${APP_NAME}-linux-musl-amd64 \
+            --add-data "web:web" $EXTRA app.py
           (cd dist && tar czf ${APP_NAME}-linux-musl-amd64.tar.gz ${APP_NAME}-linux-musl-amd64)
       - uses: actions/upload-artifact@v4
         with:
