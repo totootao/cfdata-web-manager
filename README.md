@@ -52,8 +52,8 @@ python3 app.py --port 8088
 | Linux ARM64 | `cfdata-web-manager-linux-arm64.tar.gz` | ✅ 已内嵌 |
 | Linux ARMv7 32位 | `cfdata-web-manager-linux-armv7.tar.gz` | ❌ 请自行放置 |
 | Linux musl (Alpine) | `cfdata-web-manager-linux-musl-amd64.tar.gz` | ❌ 请自行放置 |
-| macOS Intel | `cfdata-web-manager-macos-amd64.tar.gz` | ✅ 已内嵌 |
-| macOS Apple Silicon | `cfdata-web-manager-macos-arm64.tar.gz` | ✅ 已内嵌 |
+| macOS Intel | `cfdata-web-manager-macos-amd64.zip` | ✅ 已内嵌 |
+| macOS Apple Silicon | `cfdata-web-manager-macos-arm64.zip` | ✅ 已内嵌 |
 | Windows x64 / x86 / ARM64 | `cfdata-web-manager-windows-*.zip` | x64/ARM64 已内嵌 |
 | FreeBSD x86_64 | `cfdata-web-manager-freebsd-amd64.tar.gz` | ❌ 请自行放置 |
 | 任意平台（有 Python 3.8+ 即可） | `cfdata-web-manager-universal-py3.pyz` | ❌ 请自行放置 |
@@ -76,6 +76,23 @@ python3 cfdata-web-manager-universal-py3.pyz --port 8088
 - 单文件程序已内嵌 Web 界面；配置与结果保存在可执行文件同目录（`results/`、`data/`）
 - 未内嵌 cfdata 的平台，把对应平台的官方 `cfdata` 二进制放在可执行文件同目录并命名 `cfdata`（或用 PATH），也可在界面「参数设置」里指定路径
 - `universal-py3.pyz` 依赖 Python 3.8+，其余产物完全免装环境
+
+## 代码签名
+
+构建流程内置三套签名，**配置了对应仓库 secrets 才会启用**，未配置时自动跳过、不影响构建：
+
+| 平台 | 签名方式 | 需要的 secrets |
+| --- | --- | --- |
+| macOS | Developer ID 签名（hardened runtime）+ Apple 公证 | `MACOS_CERTIFICATE`（p12 的 base64）、`MACOS_CERTIFICATE_PASSWORD`、`APPLE_ID`、`APPLE_APP_PASSWORD`（App 专用密码）、`APPLE_TEAM_ID` |
+| Windows | Authenticode 签名 + 时间戳 | `WINDOWS_CERTIFICATE`（pfx 的 base64）、`WINDOWS_CERTIFICATE_PASSWORD` |
+| 全平台 | 对 `SHA256SUMS.txt` 做 GPG 分离签名（`.asc`） | `GPG_PRIVATE_KEY`、可选 `GPG_PASSPHRASE` |
+
+说明：
+
+- macOS 内嵌的 cfdata 会**先签名再打包**（单文件模式下它会被解包后执行，未签名会被 Gatekeeper 拦截）
+- macOS 产物因此用 zip 而非 tar.gz（Apple 公证只接受 zip / dmg / pkg）；zip 无法 staple 票据，首次运行由 Gatekeeper 联网校验
+- 无正式 Windows 证书时，可在 Actions 手动触发时勾选 `self_sign` 用自签名证书签名——只能消除"未签名"标记，**不能**消除 SmartScreen 声誉警告（需 OV/EV 证书累积声誉）
+- 未签名的 macOS 产物若被 Gatekeeper 拦截：`xattr -d com.apple.quarantine cfdata-web-manager-macos-arm64`
 
 ## 使用流程
 

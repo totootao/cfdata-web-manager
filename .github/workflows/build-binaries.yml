@@ -8,6 +8,11 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      self_sign:
+        description: '无正式证书时, 用自签名证书为 Windows 产物签名(仅消除"未签名"标记, 不能消除 SmartScreen 警告)'
+        type: boolean
+        default: false
 
 concurrency:
   group: build-binaries
@@ -21,6 +26,12 @@ env:
   # 官方 cfdata 多平台二进制来源(构建时按目标平台捆绑)
   CFDATA_REPO: PoemMisty/CFData-WEB
   PYTHON_VERSION: '3.12'
+  # ---- 代码签名: 配置对应 secrets 后自动启用; 未配置则整段跳过, 构建不受影响 ----
+  HAS_MACOS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
+  HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+  HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+  HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+  WINDOWS_TIMESTAMP_URL: http://timestamp.digicert.com
 
 jobs:
   # ---------- 主力矩阵: 原生 runner + PyInstaller(PyInstaller 不支持交叉编译, 故按原生平台分组) ----------
@@ -87,6 +98,36 @@ jobs:
           chmod +x "$DEST" 2>/dev/null || true
           ls -la bundle/
 
+      - name: 导入 macOS 签名证书
+        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
+          KC_PASSWORD="$(openssl rand -base64 24)"
+          echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "KC_PASSWORD=$KC_PASSWORD" >> "$GITHUB_ENV"
+          echo -n "${{ secrets.MACOS_CERTIFICATE }}" | base64 --decode -o "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+                     | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          [ -n "$IDENTITY" ] || IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+                     | awk -F'"' 'NR==1 {print $2}')
+          echo "MACOS_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "签名身份: $IDENTITY"
+
+      - name: 签名内嵌 cfdata (macOS)
+        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
+        run: |
+          [ -f bundle/cfdata ] || exit 0
+          # 单文件模式下 cfdata 会解压到临时目录后执行, 必须先签名, 否则 Gatekeeper 会拦截子进程
+          codesign --force --sign "$MACOS_IDENTITY" --options runtime --timestamp bundle/cfdata
+          codesign --verify --verbose=2 bundle/cfdata
+
       - name: PyInstaller 打包 (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -120,12 +161,79 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "冒烟测试失败 (退出码 $LASTEXITCODE)" }
           Write-Host "冒烟测试通过"
 
+      - name: 签名可执行文件 (macOS)
+        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
+        run: |
+          cat > entitlements.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key><true/>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+            <key>com.apple.security.cs.disable-library-validation</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          BIN="dist/${APP_NAME}-${{ matrix.target }}"
+          codesign --force --sign "$MACOS_IDENTITY" --options runtime --timestamp \
+            --entitlements entitlements.plist "$BIN"
+          codesign --verify --verbose=2 "$BIN"
+
+      - name: 签名可执行文件 (Windows)
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERTIFICATE }}"))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe `
+                       | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
+          if (-not $signtool) { throw "未找到 signtool.exe" }
+          $exe = "dist\${{ env.APP_NAME }}-${{ matrix.target }}.exe"
+          & $signtool sign /fd SHA256 /td SHA256 /tr "${{ env.WINDOWS_TIMESTAMP_URL }}" `
+            /f $pfx /p "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" /v $exe
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode 签名失败" }
+          & $signtool verify /pa /v $exe
+
+      - name: 自签名 (Windows, 无正式证书时)
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT != 'true' && inputs.self_sign
+        shell: pwsh
+        run: |
+          New-SelfSignedCertificate -Subject "CN=cfdata-web-manager (self-signed)" `
+            -CertStoreLocation Cert:\CurrentUser\My -Type CodeSigningCert `
+            -HashAlgorithm SHA256 -KeyLength 2048 | Out-Null
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe `
+                       | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
+          $exe = "dist\${{ env.APP_NAME }}-${{ matrix.target }}.exe"
+          & $signtool sign /fd SHA256 /a $exe
+          & $signtool verify $exe
+
       - name: 打包压缩 (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           cd dist
-          tar czf "${APP_NAME}-${{ matrix.target }}.tar.gz" "${APP_NAME}-${{ matrix.target }}"
+          name="${APP_NAME}-${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # macOS 用 zip: 公证(notarytool)只接受 zip/dmg/pkg
+            zip -q -r "$name.zip" "$name"
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+
+      - name: 公证 (macOS)
+        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true' && env.HAS_APPLE_ID == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd dist
+          name="${APP_NAME}-${{ matrix.target }}"
+          xcrun notarytool submit "$name.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 20m
+          # zip 无法 staple 票据, 首次运行由 Gatekeeper 在线校验(需联网)
+          xcrun stapler staple "$name.zip" || echo "zip 不支持 staple, 改为在线校验"
 
       - name: 打包压缩 (Windows)
         if: runner.os == 'Windows'
@@ -297,7 +405,28 @@ jobs:
             echo "- 运行后浏览器访问 http://127.0.0.1:8088/ ; 配置与结果保存在可执行文件同目录"
             echo ""
             echo "校验: 下载 SHA256SUMS.txt 后执行 \`sha256sum -c SHA256SUMS.txt\`"
+            if [ "$HAS_GPG_KEY" = "true" ]; then
+              echo "GPG 签名: SHA256SUMS.txt.asc (\`gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt\`)"
+            fi
+            if [ "$HAS_MACOS_CERT" = "true" ]; then
+              echo "- macOS 产物已 Developer ID 签名$( [ "$HAS_APPLE_ID" = "true" ] && echo ' 并经 Apple 公证' )"
+            fi
+            if [ "$HAS_WINDOWS_CERT" = "true" ]; then
+              echo "- Windows 产物已 Authenticode 签名"
+            fi
           } > ../notes.md
+
+      - name: GPG 签名校验文件
+        if: env.HAS_GPG_KEY == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          cd dist
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --armor --detach-sign --output SHA256SUMS.txt.asc SHA256SUMS.txt
+          gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt
 
       - name: 发布到 GitHub Release
         id: publish
