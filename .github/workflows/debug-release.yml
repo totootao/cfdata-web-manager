@@ -1,0 +1,44 @@
+name: Debug Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 探测 gh 发布能力
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "=== gh version ==="
+            gh --version
+            echo "=== gh auth status ==="
+            gh auth status 2>&1
+            echo "=== 创建纯文本 release ==="
+            gh release create probe-test --title "probe" --notes "probe test" 2>&1
+            echo "exit=$?"
+            echo "=== 创建带附件 release ==="
+            echo hello > f.txt
+            gh release create probe-test2 --title "probe2" --notes "probe2" ./f.txt 2>&1
+            echo "exit=$?"
+            echo "=== 删除 ==="
+            gh release delete probe-test --cleanup-tag -y 2>&1
+            gh release delete probe-test2 --cleanup-tag -y 2>&1
+          } > gh.log 2>&1 || true
+          cat gh.log
+      - name: 推送诊断
+        if: always()
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git checkout -B ci-diag
+          git add -f gh.log
+          git commit -m "diag: release $(date -u +%FT%TZ)"
+          git push -f origin ci-diag
