@@ -363,34 +363,39 @@ jobs:
           retention-days: 30
 
   # ---------- Linux musl ARM64 (Alpine 软路由/NAS/开发板) ----------
+  # 不能写成 container: python:3.12-alpine —— GitHub 限制 "JavaScript Actions in Alpine
+  # containers are only supported on x64 Linux runners", ARM64 runner 上 checkout/upload 会直接失败。
+  # 故在宿主 runner 上 checkout, 再手动 docker run alpine 容器完成构建。
   linux-musl-arm64:
     name: 构建 linux-musl-arm64 (实验, Alpine)
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
     timeout-minutes: 60
-    container:
-      image: python:3.12-alpine
     steps:
-      - name: 安装构建依赖
-        run: apk add --no-cache git build-base binutils patchelf curl
       - uses: actions/checkout@v4
-      # 官方 Go 版 cfdata 为静态链接, musl/aarch64 环境同样可直接运行
-      - name: 下载官方 cfdata (静态链接)
+      - name: Alpine 容器内构建
         run: |
-          mkdir -p bundle
-          curl -fsSL --retry 3 -o bundle/cfdata \
-            "https://github.com/${CFDATA_REPO}/releases/latest/download/cfdata-linux-arm64" \
-            || rm -f bundle/cfdata
-          if [ -f bundle/cfdata ]; then chmod +x bundle/cfdata; ls -la bundle/; fi
-      - name: 构建
-        run: |
-          pip install --no-cache-dir pyinstaller
-          # alpine 镜像默认 shell 为 ash, 不用 bash 数组语法
-          EXTRA=""
-          if [ -f bundle/cfdata ]; then EXTRA="--add-binary bundle/cfdata:."; fi
-          pyinstaller --onefile --clean --noconfirm --name ${APP_NAME}-linux-musl-arm64 \
-            --add-data "web:web" $EXTRA app.py
-          (cd dist && tar czf ${APP_NAME}-linux-musl-arm64.tar.gz ${APP_NAME}-linux-musl-arm64)
+          # 注意: docker run 不继承宿主环境变量, APP_NAME / CFDATA_REPO 必须显式 -e 传入
+          docker run --rm -v "$PWD":/work -w /work \
+            -e APP_NAME="${APP_NAME}" -e CFDATA_REPO="${CFDATA_REPO}" \
+            python:3.12-alpine sh -ec '
+              set -e
+              apk add --no-cache git build-base binutils patchelf curl
+              pip install --no-cache-dir pyinstaller
+              # 官方 Go 版 cfdata 为静态链接, 不依赖 glibc, musl/aarch64 环境可直接运行
+              mkdir -p bundle
+              curl -fsSL --retry 3 -o bundle/cfdata \
+                "https://github.com/${CFDATA_REPO}/releases/latest/download/cfdata-linux-arm64" \
+                || rm -f bundle/cfdata
+              EXTRA=""
+              if [ -f bundle/cfdata ]; then
+                chmod +x bundle/cfdata
+                EXTRA="--add-binary bundle/cfdata:."
+              fi
+              pyinstaller --onefile --clean --noconfirm --name "${APP_NAME}-linux-musl-arm64" \
+                --add-data "web:web" $EXTRA app.py
+              cd dist && tar czf "${APP_NAME}-linux-musl-arm64.tar.gz" "${APP_NAME}-linux-musl-arm64"
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: bin-linux-musl-arm64

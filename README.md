@@ -51,7 +51,8 @@ python3 app.py --port 8088
 | Linux x86_64 | `cfdata-web-manager-linux-amd64.tar.gz` | ✅ 已内嵌 |
 | Linux ARM64 | `cfdata-web-manager-linux-arm64.tar.gz` | ✅ 已内嵌 |
 | Linux ARMv7 32位 | `cfdata-web-manager-linux-armv7.tar.gz` | ❌ 请自行放置 |
-| Linux musl (Alpine) | `cfdata-web-manager-linux-musl-amd64.tar.gz` | ❌ 请自行放置 |
+| Linux musl (Alpine) x86_64 | `cfdata-web-manager-linux-musl-amd64.tar.gz` | ✅ 已内嵌 |
+| Linux musl (Alpine) ARM64 | `cfdata-web-manager-linux-musl-arm64.tar.gz` | ✅ 已内嵌 |
 | macOS Intel | `cfdata-web-manager-macos-amd64.zip` | ✅ 已内嵌 |
 | macOS Apple Silicon | `cfdata-web-manager-macos-arm64.zip` | ✅ 已内嵌 |
 | Windows x64 / x86 / ARM64 | `cfdata-web-manager-windows-*.zip` | x64/ARM64 已内嵌 |
@@ -67,6 +68,11 @@ chmod +x cfdata-web-manager-linux-amd64
 # Windows：解压 zip 后运行
 cfdata-web-manager-windows-amd64.exe --port 8088
 
+# Alpine / musl（软路由、NAS、开发板）
+tar xzf cfdata-web-manager-linux-musl-amd64.tar.gz   # ARM64 用 -musl-arm64
+chmod +x cfdata-web-manager-linux-musl-amd64
+./cfdata-web-manager-linux-musl-amd64 --port 8088
+
 # 通用 .pyz（路由器/Termux/其他架构服务器等）
 python3 cfdata-web-manager-universal-py3.pyz --port 8088
 ```
@@ -76,6 +82,7 @@ python3 cfdata-web-manager-universal-py3.pyz --port 8088
 - 单文件程序已内嵌 Web 界面；配置与结果保存在可执行文件同目录（`results/`、`data/`）
 - 未内嵌 cfdata 的平台，把对应平台的官方 `cfdata` 二进制放在可执行文件同目录并命名 `cfdata`（或用 PATH），也可在界面「参数设置」里指定路径
 - `universal-py3.pyz` 依赖 Python 3.8+，其余产物完全免装环境
+- **Alpine 请用 musl 产物**：普通 Linux 版是 glibc 链接，在 Alpine 上跑不起来也不必装 `gcompat`；musl 版内嵌的官方 cfdata 是 Go 静态链接，同样不依赖 glibc，开箱即用
 
 ## 代码签名
 
