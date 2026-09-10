@@ -1367,8 +1367,17 @@ class TaskRunner:
             os.path.join(APP_DIR, 'cfdata-linux-amd64'),
             os.path.join(APP_DIR, 'cfdata'),
         ]
+        if os.name == 'nt':  # Windows 自备二进制通常是 cfdata.exe
+            candidates += [
+                os.path.join(APP_DIR, 'cfdata.exe'),
+                os.path.join(APP_DIR, 'cfdata-windows-amd64.exe'),
+                os.path.join(APP_DIR, 'cfdata-windows-arm64.exe'),
+                os.path.join(APP_DIR, 'cfdata-windows-386.exe'),
+            ]
         if BUNDLE_DIR != APP_DIR:  # PyInstaller 打包时内嵌的 cfdata
             candidates.append(os.path.join(BUNDLE_DIR, 'cfdata'))
+            if os.name == 'nt':
+                candidates.append(os.path.join(BUNDLE_DIR, 'cfdata.exe'))
         which = shutil.which('cfdata')
         if which:
             candidates.append(which)
@@ -3402,7 +3411,28 @@ def main():
 
     SCHEDULER.start()
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as e:
+        # Windows 中文版对此的原始描述是"以一种访问权限不允许的方式做了一个访问套接字的
+        # 尝试"/"通常每个套接字地址只允许使用一次", 极难定位, 这里给出可操作的提示
+        sys.stderr.write('\n[错误] 无法监听 %s:%d\n  %s\n' % (args.host, args.port, e))
+        sys.stderr.write('\n可能原因与处理:\n')
+        sys.stderr.write('  1) 端口已被其他程序占用(或本程序已启动了一个实例)\n')
+        sys.stderr.write('     - 换端口启动:   %s --port 8099\n' %
+                         os.path.basename(sys.argv[0] or 'app.py'))
+        sys.stderr.write('     - 查看谁占用:   netstat -ano | findstr :%d\n' % args.port)
+        if os.name == 'nt':
+            sys.stderr.write('  2) 端口落在 Windows 动态保留区间内(Hyper-V / WSL / Docker 会预留一段端口)\n')
+            sys.stderr.write('     - 查看保留范围: netsh int ipv4 show excludedportrange protocol=tcp\n')
+            sys.stderr.write('     - 换一个不在保留区间内的端口即可\n')
+        sys.stderr.write('  3) 监听 1024 以下端口需要管理员权限\n')
+        if getattr(sys, 'frozen', False):  # 双击 exe 时窗口会直接关闭, 这里停一下
+            try:
+                input('\n按回车键退出...')
+            except Exception:
+                pass
+        sys.exit(1)
     server.daemon_threads = True
     print('=' * 56)
     print('  CFData 优选 Web 管理平台 已启动')
