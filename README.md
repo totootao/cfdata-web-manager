@@ -42,6 +42,41 @@ python3 app.py --port 8088
 | `--host` | `0.0.0.0` | 监听地址 |
 | `--port` | `8088` | 监听端口 |
 
+## 多平台二进制（预编译版，免装 Python）
+
+由 GitHub Actions 自动构建（[workflow](.github/workflows/build-binaries.yml)），从 [Releases](https://github.com/totootao/cfdata-web-manager/releases/tag/binaries) 或 Actions 构建产物下载：
+
+| 平台 | 产物 | cfdata |
+| --- | --- | --- |
+| Linux x86_64 | `cfdata-web-manager-linux-amd64.tar.gz` | ✅ 已内嵌 |
+| Linux ARM64 | `cfdata-web-manager-linux-arm64.tar.gz` | ✅ 已内嵌 |
+| Linux ARMv7 32位 | `cfdata-web-manager-linux-armv7.tar.gz` | ❌ 请自行放置 |
+| Linux musl (Alpine) | `cfdata-web-manager-linux-musl-amd64.tar.gz` | ❌ 请自行放置 |
+| macOS Intel | `cfdata-web-manager-macos-amd64.tar.gz` | ✅ 已内嵌 |
+| macOS Apple Silicon | `cfdata-web-manager-macos-arm64.tar.gz` | ✅ 已内嵌 |
+| Windows x64 / x86 / ARM64 | `cfdata-web-manager-windows-*.zip` | x64/ARM64 已内嵌 |
+| FreeBSD x86_64 | `cfdata-web-manager-freebsd-amd64.tar.gz` | ❌ 请自行放置 |
+| 任意平台（有 Python 3.8+ 即可） | `cfdata-web-manager-universal-py3.pyz` | ❌ 请自行放置 |
+
+```bash
+# Linux / macOS / FreeBSD
+tar xzf cfdata-web-manager-linux-amd64.tar.gz
+chmod +x cfdata-web-manager-linux-amd64
+./cfdata-web-manager-linux-amd64 --port 8088
+
+# Windows：解压 zip 后运行
+cfdata-web-manager-windows-amd64.exe --port 8088
+
+# 通用 .pyz（路由器/Termux/其他架构服务器等）
+python3 cfdata-web-manager-universal-py3.pyz --port 8088
+```
+
+说明：
+
+- 单文件程序已内嵌 Web 界面；配置与结果保存在可执行文件同目录（`results/`、`data/`）
+- 未内嵌 cfdata 的平台，把对应平台的官方 `cfdata` 二进制放在可执行文件同目录并命名 `cfdata`（或用 PATH），也可在界面「参数设置」里指定路径
+- `universal-py3.pyz` 依赖 Python 3.8+，其余产物完全免装环境
+
 ## 使用流程
 
 1. **API 源管理**：添加优选 API 地址（如 `https://bestcf.pages.dev/random-region/HK/all.txt`），可添加多个

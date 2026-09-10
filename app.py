@@ -34,10 +34,49 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import urllib.request
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# 应用根目录探测: 兼容三种运行形态
+#   1) PyInstaller 单文件/单目录: 内嵌资源在 _MEIPASS, 运行数据(results/data)写到可执行文件所在目录
+#   2) zipapp(.pyz): index.html 从压缩包内读取, 运行数据写到 .pyz 所在目录
+#   3) 普通脚本: 与 app.py 同目录
+def _zip_ancestor(p):
+    while p and os.path.dirname(p) != p:
+        if os.path.exists(p):
+            return p
+        p = os.path.dirname(p)
+    return p
+
+BUNDLE_ARCHIVE = None
+if getattr(sys, 'frozen', False):  # PyInstaller
+    BUNDLE_DIR = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.abspath(sys.executable))
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    WEB_DIR = os.path.join(BUNDLE_DIR, 'web')
+elif not os.path.exists(os.path.abspath(__file__)):  # zipapp(.pyz) 内运行
+    BUNDLE_ARCHIVE = _zip_ancestor(os.path.abspath(__file__))
+    APP_DIR = os.path.dirname(os.path.abspath(BUNDLE_ARCHIVE))
+    BUNDLE_DIR = APP_DIR
+    WEB_DIR = os.path.join(APP_DIR, 'web')
+else:  # 普通脚本
+    BUNDLE_DIR = APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    WEB_DIR = os.path.join(APP_DIR, 'web')
 RESULTS_DIR = os.path.join(APP_DIR, 'results')
-WEB_DIR = os.path.join(APP_DIR, 'web')
 RUNS_INDEX_PATH = os.path.join(RESULTS_DIR, 'runs.json')
+
+
+def read_web_asset(name):
+    """读取 web 资源: 优先磁盘目录, zipapp 形态回退到压缩包内读取"""
+    try:
+        with open(os.path.join(WEB_DIR, name), 'rb') as f:
+            return f.read()
+    except OSError:
+        pass
+    if BUNDLE_ARCHIVE:
+        try:
+            import zipfile
+            with zipfile.ZipFile(BUNDLE_ARCHIVE) as z:
+                return z.read('web/' + name)
+        except Exception:
+            pass
+    return None
 
 # 数据目录(存放可持久化状态): Docker 环境使用挂载点 /app/data, 本地运行回退到应用目录
 # 可用环境变量 CFDATA_DATA_DIR 覆盖
@@ -1320,6 +1359,8 @@ class TaskRunner:
             os.path.join(APP_DIR, 'cfdata-linux-amd64'),
             os.path.join(APP_DIR, 'cfdata'),
         ]
+        if BUNDLE_DIR != APP_DIR:  # PyInstaller 打包时内嵌的 cfdata
+            candidates.append(os.path.join(BUNDLE_DIR, 'cfdata'))
         which = shutil.which('cfdata')
         if which:
             candidates.append(which)
@@ -3083,12 +3124,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_auth(qs if path.startswith('/api/download/') else None):
                 return
             if path in ('/', '/index.html'):
-                index = os.path.join(WEB_DIR, 'index.html')
-                if not os.path.exists(index):
+                body = read_web_asset('index.html')
+                if body is None:
                     self._json({'ok': False, 'error': 'web/index.html 缺失'}, 500)
                     return
-                with open(index, 'rb') as f:
-                    body = f.read()
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')

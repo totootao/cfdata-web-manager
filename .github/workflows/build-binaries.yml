@@ -1,0 +1,315 @@
+name: Build 多平台二进制
+
+# 为尽可能多的平台编译单文件可执行程序(PyInstaller 打包 app.py, 内嵌 web 界面;
+# 主流平台同时内嵌官方同架构 cfdata 二进制, 开箱即用)。
+# 另产出通用 zipapp(.pyz), 任何装有 Python 3.8+ 的平台均可直接运行。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: build-binaries
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: cfdata-web-manager
+  # 官方 cfdata 多平台二进制来源(构建时按目标平台捆绑)
+  CFDATA_REPO: PoemMisty/CFData-WEB
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ---------- 主力矩阵: 原生 runner + PyInstaller(PyInstaller 不支持交叉编译, 故按原生平台分组) ----------
+  build:
+    name: 构建 ${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ===== 主流平台(必过) =====
+          - target: linux-amd64        # Linux x86_64 (绝大多数 VPS/服务器)
+            runs-on: ubuntu-latest
+            python-arch: x64
+            cfdata: cfdata-linux-amd64
+          - target: linux-arm64        # Linux ARM64 (ARM 云服务器/NAS/树莓派4+)
+            runs-on: ubuntu-24.04-arm
+            python-arch: arm64
+            cfdata: cfdata-linux-arm64
+          - target: macos-amd64        # macOS Intel (x64 Python 经 Rosetta 构建)
+            runs-on: macos-15
+            python-arch: x64
+            cfdata: cfdata-darwin-amd64
+          - target: macos-arm64        # macOS Apple Silicon (M1/M2/M3/M4)
+            runs-on: macos-15
+            python-arch: arm64
+            cfdata: cfdata-darwin-arm64
+          - target: windows-amd64      # Windows x64
+            runs-on: windows-latest
+            python-arch: x64
+            cfdata: cfdata-windows-amd64.exe
+          - target: windows-x86        # Windows 32位 (老机器兼容)
+            runs-on: windows-latest
+            python-arch: x86
+            cfdata: ''
+          # ===== 扩展平台(实验性, 失败不影响整体发布) =====
+          - target: windows-arm64      # Windows on ARM (Surface/骁龙笔记本)
+            runs-on: windows-11-arm
+            python-arch: arm64
+            cfdata: cfdata-windows-arm64.exe
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python (${{ matrix.python-arch }})
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: ${{ matrix.python-arch }}
+
+      - name: 安装 PyInstaller
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: 下载官方 cfdata (${{ matrix.cfdata }})
+        if: matrix.cfdata != ''
+        shell: bash
+        run: |
+          mkdir -p bundle
+          if [ "${{ runner.os }}" = "Windows" ]; then DEST="bundle/cfdata.exe"; else DEST="bundle/cfdata"; fi
+          curl -fsSL --retry 3 -o "$DEST" \
+            "https://github.com/${CFDATA_REPO}/releases/latest/download/${{ matrix.cfdata }}"
+          chmod +x "$DEST" 2>/dev/null || true
+          ls -la bundle/
+
+      - name: PyInstaller 打包 (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="${APP_NAME}-${{ matrix.target }}"
+          args=(--onefile --clean --noconfirm --name "$name" --add-data "web:web")
+          if [ -f bundle/cfdata ]; then args+=(--add-binary "bundle/cfdata:."); fi
+          python -m PyInstaller "${args[@]}" app.py
+
+      - name: PyInstaller 打包 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "${{ env.APP_NAME }}-${{ matrix.target }}"
+          $pyArgs = @('--onefile','--clean','--noconfirm','--name', $name, '--add-data', 'web;web')
+          if (Test-Path 'bundle/cfdata.exe') { $pyArgs += @('--add-binary', 'bundle/cfdata.exe;.') }
+          python -m PyInstaller @pyArgs app.py
+
+      - name: 冒烟测试 (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./dist/${APP_NAME}-${{ matrix.target }} --help > /dev/null && echo "冒烟测试通过"
+
+      - name: 冒烟测试 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe" --help *> $null
+          if ($LASTEXITCODE -ne 0) { throw "冒烟测试失败" }
+          Write-Host "冒烟测试通过"
+
+      - name: 打包压缩 (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          tar czf "${APP_NAME}-${{ matrix.target }}.tar.gz" "${APP_NAME}-${{ matrix.target }}"
+
+      - name: 打包压缩 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe" `
+            -DestinationPath "dist/${{ env.APP_NAME }}-${{ matrix.target }}.zip" -Force
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------- 通用 zipapp: 任何有 Python 3.8+ 的平台都能跑(含 ppc64le/s390x/路由器/Termux 等) ----------
+  zipapp:
+    name: 构建 universal-py3 (zipapp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 构建 .pyz
+        run: |
+          mkdir -p src && cp app.py src/ && cp -r web src/
+          python -m zipapp src -o "dist/${APP_NAME}-universal-py3.pyz" -m "app:main" -p "/usr/bin/env python3"
+          ./dist/${APP_NAME}-universal-py3.pyz --help > /dev/null && echo "冒烟测试通过"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-universal-py3
+          path: dist/*.pyz
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------- Linux ARMv7 32位(路由器/老 NAS), QEMU 模拟构建 ----------
+  linux-armv7:
+    name: 构建 linux-armv7 (实验, QEMU)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: armv7 容器内构建
+        run: |
+          docker run --rm --platform linux/arm/v7 -v "$PWD":/work -w /work \
+            arm32v7/python:3.12-slim bash -ec '
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
+              pip install --no-cache-dir pyinstaller
+              pyinstaller --onefile --clean --noconfirm --name ${APP_NAME}-linux-armv7 --add-data "web:web" app.py
+              cd dist && tar czf ${APP_NAME}-linux-armv7.tar.gz ${APP_NAME}-linux-armv7
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux-armv7
+          path: dist/*.tar.gz
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------- Linux musl (Alpine 服务器) ----------
+  linux-musl-amd64:
+    name: 构建 linux-musl-amd64 (实验, Alpine)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    container:
+      image: python:3.12-alpine
+    steps:
+      - name: 安装构建依赖
+        run: apk add --no-cache git build-base binutils patchelf
+      - uses: actions/checkout@v4
+      - name: 构建
+        run: |
+          pip install --no-cache-dir pyinstaller
+          pyinstaller --onefile --clean --noconfirm --name ${APP_NAME}-linux-musl-amd64 --add-data "web:web" app.py
+          (cd dist && tar czf ${APP_NAME}-linux-musl-amd64.tar.gz ${APP_NAME}-linux-musl-amd64)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux-musl-amd64
+          path: dist/*.tar.gz
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------- FreeBSD amd64 (实验, FreeBSD 虚拟机构建) ----------
+  freebsd-amd64:
+    name: 构建 freebsd-amd64 (实验)
+    runs-on: macos-15
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: FreeBSD 虚拟机内构建
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkg install -y python312 py312-pip
+          run: |
+            set -e
+            python3.12 -m pip install --upgrade pyinstaller
+            python3.12 -m PyInstaller --onefile --clean --noconfirm \
+              --name ${APP_NAME}-freebsd-amd64 --add-data "web:web" app.py
+            cd dist && tar czf ${APP_NAME}-freebsd-amd64.tar.gz ${APP_NAME}-freebsd-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-freebsd-amd64
+          path: dist/*.tar.gz
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------- 汇总发布: 主力矩阵全部成功后, 把所有产物发布到 GitHub Release ----------
+  release:
+    name: 汇总发布到 Release
+    needs: [build, zipapp, linux-armv7, linux-musl-amd64, freebsd-amd64]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 汇集全部产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: dist
+
+      - name: 生成 SHA256SUMS 与发布说明
+        run: |
+          cd dist
+          # 对所有产物生成校验和(先于发布说明, 避免被列入文件清单)
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -exec sha256sum {} + > SHA256SUMS.txt
+          ls -la
+          {
+            echo "## ${APP_NAME} 多平台二进制 (自动构建)"
+            echo ""
+            echo "- 构建来源: ${GITHUB_REPOSITORY} @ \`${GITHUB_SHA:0:7}\`"
+            echo "- 主流平台已内嵌官方 [${CFDATA_REPO}](https://github.com/${CFDATA_REPO}) 同架构 cfdata, 下载即用"
+            echo ""
+            echo "| 产物 | 大小 |"
+            echo "| --- | --- |"
+            for f in *; do
+              [ "$f" = "SHA256SUMS.txt" ] && continue
+              printf '| %s | %s |\n' "$f" "$(du -h "$f" | cut -f1)"
+            done
+            echo ""
+            echo "### 使用方法"
+            echo ""
+            echo "- **Linux / macOS / FreeBSD**: \`tar xzf cfdata-web-manager-*.tar.gz && chmod +x cfdata-web-manager-* && ./cfdata-web-manager-* --port 8088\`"
+            echo "- **Windows**: 解压 zip 后双击或在终端运行 \`cfdata-web-manager-*.exe --port 8088\`"
+            echo "- **universal-py3 (.pyz)**: 任何装有 Python 3.8+ 的平台: \`python3 cfdata-web-manager-universal-py3.pyz --port 8088\`"
+            echo "- 运行后浏览器访问 http://127.0.0.1:8088/ ; 配置与结果保存在可执行文件同目录"
+            echo ""
+            echo "校验: 下载 SHA256SUMS.txt 后执行 \`sha256sum -c SHA256SUMS.txt\`"
+          } > ../notes.md
+
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+            EXTRA_FLAGS=""
+            TITLE="${APP_NAME} ${TAG}"
+          else
+            TAG="binaries"
+            EXTRA_FLAGS="--prerelease"
+            TITLE="多平台二进制 (最新构建)"
+            gh release delete "$TAG" --cleanup-tag -y 2>/dev/null || true
+          fi
+          gh release create "$TAG" ./* --title "$TITLE" --notes-file ../notes.md $EXTRA_FLAGS
+
+      - name: 写入构建摘要
+        run: |
+          echo "## 多平台二进制构建完成 ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 产物 | 大小 |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          cd dist
+          for f in *; do
+            printf '| %s | %s |\n' "$f" "$(du -h "$f" | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          done
