@@ -96,33 +96,29 @@ jobs:
           if [ -f bundle/cfdata ]; then args+=(--add-binary "bundle/cfdata:."); fi
           python -m PyInstaller "${args[@]}" app.py
 
-      - name: PyInstaller 打包 + 冒烟测试 (Windows)
+      - name: PyInstaller 打包 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $name = "${{ env.APP_NAME }}-${{ matrix.target }}"
-          $exe  = "dist/$name.exe"
-          $log  = "dist/smoke-${{ matrix.target }}.txt"
           $pyArgs = @('--onefile','--clean','--noconfirm','--name', $name, '--add-data', 'web;web')
           if (Test-Path 'bundle/cfdata.exe') { $pyArgs += @('--add-binary', 'bundle/cfdata.exe;.') }
           python -m PyInstaller @pyArgs app.py
-          $report = @("target: ${{ matrix.target }}", "exe-exists: $(Test-Path $exe)")
-          if (Test-Path $exe) {
-            $out = & $exe --help 2>&1 | Out-String
-            $report += "exit-code: $LASTEXITCODE"
-            $report += "--- 冒烟输出 ---"
-            $report += $out
-          } else {
-            $report += "--- dist 目录内容 ---"
-            $report += (Get-ChildItem dist -Force -ErrorAction SilentlyContinue | Out-String)
-          }
-          $report -join "`n" | Out-File -Encoding utf8 $log
-          Get-Content $log
 
       - name: 冒烟测试 (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: ./dist/${APP_NAME}-${{ matrix.target }} --help > /dev/null && echo "冒烟测试通过"
+
+      - name: 冒烟测试 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe"
+          $out = & $exe --help 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "冒烟测试失败 (退出码 $LASTEXITCODE)" }
+          Write-Host "冒烟测试通过"
 
       - name: 打包压缩 (Unix)
         if: runner.os != 'Windows'
@@ -135,11 +131,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe"
-          if (Test-Path $exe) {
-            Compress-Archive -Path $exe `
-              -DestinationPath "dist/${{ env.APP_NAME }}-${{ matrix.target }}.zip" -Force
-          }
+          Compress-Archive -Path "dist/${{ env.APP_NAME }}-${{ matrix.target }}.exe" `
+            -DestinationPath "dist/${{ env.APP_NAME }}-${{ matrix.target }}.zip" -Force
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -148,7 +141,6 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
-            dist/smoke-*.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -190,7 +182,7 @@ jobs:
             -e APP_NAME="${APP_NAME}" -e DEBIAN_FRONTEND=noninteractive \
             arm32v7/python:3.12-slim bash -ec '
               set -e
-              apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev python3-dev
               pip install --no-cache-dir pyinstaller
               pyinstaller --onefile --clean --noconfirm --name "${APP_NAME}-linux-armv7" --add-data "web:web" app.py
               cd dist && tar czf "${APP_NAME}-linux-armv7.tar.gz" "${APP_NAME}-linux-armv7"

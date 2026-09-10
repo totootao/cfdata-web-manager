@@ -34,6 +34,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import urllib.request
 
+# 控制台输出编码: Windows 默认代码页(cp1252/gbk 等)可能无法编码中文日志,
+# 打印时会抛 UnicodeEncodeError, 这里统一改为 UTF-8(Python 3.7+ 支持 reconfigure)
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 # 应用根目录探测: 兼容三种运行形态
 #   1) PyInstaller 单文件/单目录: 内嵌资源在 _MEIPASS, 运行数据(results/data)写到可执行文件所在目录
 #   2) zipapp(.pyz): index.html 从压缩包内读取, 运行数据写到 .pyz 所在目录
