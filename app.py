@@ -2050,12 +2050,33 @@ class TaskRunner:
         return self._exec_cmd(cmd, run_dir, out_path, settings, log, label)
 
     def _stream_output(self, proc, log, label, timeout_sec, settings=None):
-        """流式读取子进程输出, 兼容 \\r 进度刷新, 带超时与取消"""
-        fd = proc.stdout.fileno()
-        import select
+        """流式读取子进程输出, 兼容 \\r 进度刷新, 带超时与取消。
+
+        跨平台实现: 不使用 select —— Windows 的 select 仅支持 socket 文件描述符,
+        对命令行子进程的 stdout 管道调用 select.select() 会抛
+        WinError 10038 (在一个非套接字上尝试了一个操作), 导致 Windows 上每个源
+        执行即失败。改为后台线程读取管道写入队列, 主循环按 1 秒节拍检查取消/超时。
+        """
+        import queue
+        q = queue.Queue()
+
+        def _reader():
+            try:
+                while True:
+                    chunk = proc.stdout.read(8192)
+                    if not chunk:
+                        break
+                    q.put(chunk)
+            except Exception:
+                pass
+            finally:
+                q.put(None)  # EOF 哨兵
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+
         buf = b''
         deadline = (time.time() + timeout_sec) if timeout_sec > 0 else None
-        last_keepalive = time.time()
         while True:
             if self._cancel:
                 try:
@@ -2070,16 +2091,17 @@ class TaskRunner:
                 except Exception:
                     pass
                 return
-            r, _, _ = select.select([fd], [], [], 1.0)
-            if not r:
-                if proc.poll() is not None:
-                    break
-                continue
             try:
-                chunk = os.read(fd, 8192)
-            except OSError:
-                break
-            if not chunk:
+                chunk = q.get(timeout=1.0)
+            except queue.Empty:
+                # 1 秒内无新输出: 进程已退出则再等一个节拍收取残余, 否则继续轮询
+                if proc.poll() is not None:
+                    try:
+                        chunk = q.get(timeout=1.0)
+                    except queue.Empty:
+                        break
+                continue
+            if chunk is None:
                 break
             buf += chunk
             parts = re.split(b'\r\n|\r|\n', buf)
@@ -2089,9 +2111,7 @@ class TaskRunner:
                 if text:
                     display = self._track_progress(text, settings)
                     log('%s | %s' % (label, display if display is not None else text))
-            if time.time() - last_keepalive > 30:
-                last_keepalive = time.time()
-        # 冲刷剩余
+        # 冲刷剩余(可能含未以换行结束的最后一段)
         text = buf.decode('utf-8', errors='replace').strip()
         if text:
             display = self._track_progress(text, settings)
