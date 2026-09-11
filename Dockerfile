@@ -16,7 +16,7 @@ RUN apt-get update \
 
 COPY app.py /app/app.py
 COPY web/ /app/web/
-COPY cfdata-linux-amd64 /app/cfdata-linux-amd64
+COPY cfdata-bin/cfdata-linux-amd64 /app/cfdata-linux-amd64
 
 RUN chmod +x /app/cfdata-linux-amd64
 

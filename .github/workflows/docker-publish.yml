@@ -6,7 +6,7 @@ on:
     paths:
       - 'app.py'
       - 'web/**'
-      - 'cfdata-linux-amd64'
+      - 'cfdata-bin/cfdata-linux-amd64'
       - 'Dockerfile'
       - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
