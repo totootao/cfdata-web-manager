@@ -25,8 +25,8 @@
 ## 快速开始
 
 ```bash
-# 1. 确保 cfdata-linux-amd64 与 app.py 在同一目录
-chmod +x cfdata-linux-amd64
+# 1. 确保 cfdata 二进制与 app.py 可用（仓库已内置 cfdata-bin/cfdata-linux-amd64）
+chmod +x cfdata-bin/cfdata-linux-amd64   # 其他平台见 cfdata-bin/
 
 # 2. 启动（Python 3.8+，无需安装任何依赖）
 python3 app.py --port 8088
@@ -214,7 +214,7 @@ results/latest/
 ```
 cfdata_web/
 ├── app.py                 # 主程序（后端 + 静态页面服务）
-├── cfdata-linux-amd64     # CFData 二进制（测速引擎）
+├── cfdata-bin/            # 内嵌的官方 cfdata 多平台二进制（GPL-3.0, 见 SOURCES.md）
 ├── web/
 │   └── index.html         # Web 界面（单文件，无构建依赖）
 ├── data/                  # 数据目录（Docker 环境 = 挂载点 /app/data，需挂载持久化）
