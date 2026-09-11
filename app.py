@@ -2061,10 +2061,27 @@ class TaskRunner:
         q = queue.Queue()
 
         def _reader():
+            """把子进程 stdout 上"当前可用"的数据尽快搬进队列。
+
+            必须使用 read1()/os.read() 这类"有多少读多少"的语义: proc.stdout 是
+            BufferedReader, 它的 read(n) 会阻塞到凑满 n 字节或读到 EOF —— cfdata
+            测速阶段的进度是小块刷新, 长时间凑不满 8192 字节就不会返回, 日志被
+            攒在缓冲区里, 前端表现为任务卡死。read1() 只做一次底层读, 有数据
+            立即返回(Windows/Linux/macOS 行为一致, 也不依赖 select)。
+            """
+            stream = proc.stdout
+            read1 = getattr(stream, 'read1', None)
             try:
                 while True:
-                    chunk = proc.stdout.read(8192)
+                    if read1 is not None:
+                        chunk = read1(65536)
+                    else:
+                        chunk = os.read(stream.fileno(), 65536)
                     if not chunk:
+                        # 空读: 进程已退出即 EOF; 否则稍候重试(避免误判提前收尾)
+                        if proc.poll() is None:
+                            time.sleep(0.1)
+                            continue
                         break
                     q.put(chunk)
             except Exception:
@@ -2077,6 +2094,8 @@ class TaskRunner:
 
         buf = b''
         deadline = (time.time() + timeout_sec) if timeout_sec > 0 else None
+        last_output = time.time()
+        last_stall_note = time.time()
         while True:
             if self._cancel:
                 try:
@@ -2100,9 +2119,18 @@ class TaskRunner:
                         chunk = q.get(timeout=1.0)
                     except queue.Empty:
                         break
-                continue
+                else:
+                    # 看门狗: cfdata 在测速慢节点上可能长时间无输出, 每分钟提示一次
+                    # 仍在运行, 避免前端看起来像卡死(默认不设超时时尤其重要)
+                    silence = time.time() - last_output
+                    if silence >= 60 and time.time() - last_stall_note >= 60:
+                        last_stall_note = time.time()
+                        log('%s 仍在运行… (已 %d 秒无新输出, 可能在测速较慢的节点)'
+                            % (label, int(silence)))
+                    continue
             if chunk is None:
                 break
+            last_output = time.time()
             buf += chunk
             parts = re.split(b'\r\n|\r|\n', buf)
             buf = parts.pop()
