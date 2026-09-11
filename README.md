@@ -50,13 +50,14 @@ python3 app.py --port 8088
 | --- | --- | --- |
 | Linux x86_64 | `cfdata-web-manager-linux-amd64.tar.gz` | ✅ 已内嵌 |
 | Linux ARM64 | `cfdata-web-manager-linux-arm64.tar.gz` | ✅ 已内嵌 |
-| Linux ARMv7 32位 | `cfdata-web-manager-linux-armv7.tar.gz` | ❌ 请自行放置 |
+| Linux ARMv7 32位 | `cfdata-web-manager-linux-armv7.tar.gz` | ✅ 已内嵌（CI 交叉编译） |
 | Linux musl (Alpine) x86_64 | `cfdata-web-manager-linux-musl-amd64.tar.gz` | ✅ 已内嵌 |
 | Linux musl (Alpine) ARM64 | `cfdata-web-manager-linux-musl-arm64.tar.gz` | ✅ 已内嵌 |
 | macOS Intel | `cfdata-web-manager-macos-amd64.zip` | ✅ 已内嵌 |
 | macOS Apple Silicon | `cfdata-web-manager-macos-arm64.zip` | ✅ 已内嵌 |
-| Windows x64 / x86 / ARM64 | `cfdata-web-manager-windows-*.zip` | x64/ARM64 已内嵌 |
-| FreeBSD x86_64 | `cfdata-web-manager-freebsd-amd64.tar.gz` | ❌ 请自行放置 |
+| Windows x64 / ARM64 | `cfdata-web-manager-windows-amd64.zip` / `.exe` | ✅ 已内嵌 |
+| Windows x86 (32位) | `cfdata-web-manager-windows-x86.zip` | ✅ 已内嵌（CI 交叉编译） |
+| FreeBSD x86_64 | `cfdata-web-manager-freebsd-amd64.tar.gz` | ✅ 已内嵌（CI 交叉编译） |
 | 任意平台（有 Python 3.8+ 即可） | `cfdata-web-manager-universal-py3.pyz` | ❌ 请自行放置 |
 
 ```bash
@@ -80,7 +81,8 @@ python3 cfdata-web-manager-universal-py3.pyz --port 8088
 说明：
 
 - 单文件程序已内嵌 Web 界面；配置与结果保存在可执行文件同目录（`results/`、`data/`）
-- 未内嵌 cfdata 的平台，把对应平台的官方 `cfdata` 二进制放在可执行文件同目录并命名 `cfdata`（或用 PATH），也可在界面「参数设置」里指定路径
+- **所有原生二进制均已内嵌同版本 cfdata**（[PoemMisty/CFData-WEB](https://github.com/PoemMisty/CFData-WEB) v1.7.11，GPL-3.0）：官方已发布的 6 个平台（Linux/macOS/Windows 的 amd64+arm64）使用仓库 `cfdata-bin/` 中预置的官方二进制；上游未发布的 **Windows x86 / Linux ARMv7 / FreeBSD amd64** 由 CI 从 Go 源码交叉编译后内嵌。下载即用，**无需另行获取 cfdata**
+- 仅 `universal-py3.pyz` 不内嵌 cfdata（任意平台通用），如需测速可在同目录放置 `cfdata` 或在界面「参数设置」指定路径
 - `universal-py3.pyz` 依赖 Python 3.8+，其余产物完全免装环境
 - **Alpine 请用 musl 产物**：普通 Linux 版是 glibc 链接，在 Alpine 上跑不起来也不必装 `gcompat`；musl 版内嵌的官方 cfdata 是 Go 静态链接，同样不依赖 glibc，开箱即用
 

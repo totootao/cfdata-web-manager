@@ -1366,6 +1366,8 @@ class TaskRunner:
         candidates += [
             os.path.join(APP_DIR, 'cfdata-linux-amd64'),
             os.path.join(APP_DIR, 'cfdata'),
+            os.path.join(APP_DIR, 'cfdata-bin', 'cfdata-linux-amd64'),
+            os.path.join(APP_DIR, 'cfdata-bin', 'cfdata'),
         ]
         if os.name == 'nt':  # Windows 自备二进制通常是 cfdata.exe
             candidates += [

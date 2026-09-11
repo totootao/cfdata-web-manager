@@ -25,6 +25,8 @@ env:
   APP_NAME: cfdata-web-manager
   # 官方 cfdata 多平台二进制来源(构建时按目标平台捆绑)
   CFDATA_REPO: PoemMisty/CFData-WEB
+  # 内嵌 cfdata 的统一版本(仓库 cfdata-bin/ 与交叉编译均锁定此版本, 保证一致性)
+  CFDATA_REF: v1.7.11
   PYTHON_VERSION: '3.12'
   # ---- 代码签名: 配置对应 secrets 后自动启用; 未配置则整段跳过, 构建不受影响 ----
   HAS_MACOS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
@@ -68,7 +70,10 @@ jobs:
           - target: windows-x86        # Windows 32位 (老机器兼容)
             runs-on: windows-latest
             python-arch: x86
-            cfdata: ''
+            cfdata: ''                 # 上游未发布, 改用 Go 源码交叉编译后内嵌
+            cfdata-goos: windows
+            cfdata-goarch: '386'
+            experimental: true
           # ===== 扩展平台(实验性, 失败不影响整体发布) =====
           - target: windows-arm64      # Windows on ARM (Surface/骁龙笔记本)
             runs-on: windows-11-arm
@@ -87,16 +92,39 @@ jobs:
       - name: 安装 PyInstaller
         run: python -m pip install --upgrade pyinstaller
 
-      - name: 下载官方 cfdata (${{ matrix.cfdata }})
-        if: matrix.cfdata != ''
+      - name: 安装 Go (仅交叉编译 cfdata 需要)
+        if: matrix.cfdata-goos != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: 获取 cfdata (仓库内嵌二进制 or 源码交叉编译)
         shell: bash
+        env:
+          CFDATA_NAME: ${{ matrix.cfdata }}
+          CFDATA_GOOS: ${{ matrix.cfdata-goos || '' }}
+          CFDATA_GOARCH: ${{ matrix.cfdata-goarch || '' }}
+          CFDATA_REF: ${{ env.CFDATA_REF }}
         run: |
           mkdir -p bundle
-          if [ "${{ runner.os }}" = "Windows" ]; then DEST="bundle/cfdata.exe"; else DEST="bundle/cfdata"; fi
-          curl -fsSL --retry 3 -o "$DEST" \
-            "https://github.com/${CFDATA_REPO}/releases/latest/download/${{ matrix.cfdata }}"
-          chmod +x "$DEST" 2>/dev/null || true
-          ls -la bundle/
+          if [ "$RUNNER_OS" = "Windows" ]; then DEST="bundle/cfdata.exe"; else DEST="bundle/cfdata"; fi
+          if [ -n "$CFDATA_NAME" ] && [ -f "cfdata-bin/$CFDATA_NAME" ]; then
+            # 仓库已内嵌官方同版本二进制(见 cfdata-bin/), 直接复制, 构建不依赖外网下载
+            cp "cfdata-bin/$CFDATA_NAME" "$DEST"
+            echo "使用仓库内嵌 cfdata: cfdata-bin/$CFDATA_NAME"
+          elif [ -n "$CFDATA_GOOS" ]; then
+            # 上游未发布该平台: 按 GPL-3.0 源码交叉编译(CGO_ENABLED=0 静态链接)
+            rm -rf /tmp/cfdata-src
+            git clone --depth 1 --branch "$CFDATA_REF" "https://github.com/${CFDATA_REPO}.git" /tmp/cfdata-src
+            cd /tmp/cfdata-src
+            CGO_ENABLED=0 GOOS="$CFDATA_GOOS" GOARCH="$CFDATA_GOARCH" \
+              go build -trimpath -ldflags="-s -w" -o "$GITHUB_WORKSPACE/$DEST" .
+            echo "交叉编译 cfdata: GOOS=$CFDATA_GOOS GOARCH=$CFDATA_GOARCH"
+          else
+            echo "::warning::本平台未内嵌 cfdata(仅 Web 管理功能, 测速需用户自备 cfdata)"
+          fi
+          chmod +x bundle/cfdata 2>/dev/null || true
+          ls -la bundle/ || true
 
       - name: 导入 macOS 签名证书
         if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
@@ -307,6 +335,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: 交叉编译 cfdata (linux/armv7)
+        # 上游未发布 armv7 二进制, 在宿主 x86_64 上交叉编译后随挂载卷带入容器
+        run: |
+          git clone --depth 1 --branch "$CFDATA_REF" "https://github.com/${CFDATA_REPO}.git" /tmp/cfdata-src
+          cd /tmp/cfdata-src
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o cfdata .
+          mkdir -p bundle && cp cfdata bundle/cfdata && chmod +x bundle/cfdata
+          ls -la bundle/
       - name: armv7 容器内构建
         run: |
           # 注意: docker run 不继承宿主环境变量, APP_NAME 必须显式传入
@@ -316,7 +355,9 @@ jobs:
               set -e
               apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev python3-dev
               pip install --no-cache-dir pyinstaller
-              pyinstaller --onefile --clean --noconfirm --name "${APP_NAME}-linux-armv7" --add-data "web:web" app.py
+              EXTRA=""
+              if [ -f bundle/cfdata ]; then EXTRA="--add-binary bundle/cfdata:."; fi
+              pyinstaller --onefile --clean --noconfirm --name "${APP_NAME}-linux-armv7" --add-data "web:web" $EXTRA app.py
               cd dist && tar czf "${APP_NAME}-linux-armv7.tar.gz" "${APP_NAME}-linux-armv7"
             '
       - uses: actions/upload-artifact@v4
@@ -339,13 +380,16 @@ jobs:
         run: apk add --no-cache git build-base binutils patchelf curl
       - uses: actions/checkout@v4
       # 官方 Go 版 cfdata 是静态链接(CGO_ENABLED=0), 不依赖 glibc, 在 musl/Alpine 上可直接运行
-      - name: 下载官方 cfdata (静态链接)
+      - name: 复制仓库内嵌 cfdata (静态链接)
         run: |
           mkdir -p bundle
-          curl -fsSL --retry 3 -o bundle/cfdata \
-            "https://github.com/${CFDATA_REPO}/releases/latest/download/cfdata-linux-amd64" \
-            || rm -f bundle/cfdata
-          if [ -f bundle/cfdata ]; then chmod +x bundle/cfdata; ls -la bundle/; fi
+          if [ -f cfdata-bin/cfdata-linux-amd64 ]; then
+            cp cfdata-bin/cfdata-linux-amd64 bundle/cfdata && chmod +x bundle/cfdata
+            echo "使用仓库内嵌 cfdata-bin/cfdata-linux-amd64"
+          else
+            echo "::warning::未找到 cfdata-bin/cfdata-linux-amd64"
+          fi
+          ls -la bundle/ || true
       - name: 构建
         run: |
           pip install --no-cache-dir pyinstaller
@@ -375,23 +419,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Alpine 容器内构建
         run: |
-          # 注意: docker run 不继承宿主环境变量, APP_NAME / CFDATA_REPO 必须显式 -e 传入
+          # 注意: docker run 不继承宿主环境变量, APP_NAME 必须显式 -e 传入
           docker run --rm -v "$PWD":/work -w /work \
-            -e APP_NAME="${APP_NAME}" -e CFDATA_REPO="${CFDATA_REPO}" \
+            -e APP_NAME="${APP_NAME}" \
             python:3.12-alpine sh -ec '
               set -e
               apk add --no-cache git build-base binutils patchelf curl
               pip install --no-cache-dir pyinstaller
               # 官方 Go 版 cfdata 为静态链接, 不依赖 glibc, musl/aarch64 环境可直接运行
               mkdir -p bundle
-              curl -fsSL --retry 3 -o bundle/cfdata \
-                "https://github.com/${CFDATA_REPO}/releases/latest/download/cfdata-linux-arm64" \
-                || rm -f bundle/cfdata
-              EXTRA=""
-              if [ -f bundle/cfdata ]; then
-                chmod +x bundle/cfdata
-                EXTRA="--add-binary bundle/cfdata:."
+              if [ -f cfdata-bin/cfdata-linux-arm64 ]; then
+                cp cfdata-bin/cfdata-linux-arm64 bundle/cfdata && chmod +x bundle/cfdata
+                echo "使用仓库内嵌 cfdata-bin/cfdata-linux-arm64"
+              else
+                echo "::warning::未找到 cfdata-bin/cfdata-linux-arm64"
               fi
+              EXTRA=""
+              if [ -f bundle/cfdata ]; then EXTRA="--add-binary bundle/cfdata:."; fi
               pyinstaller --onefile --clean --noconfirm --name "${APP_NAME}-linux-musl-arm64" \
                 --add-data "web:web" $EXTRA app.py
               cd dist && tar czf "${APP_NAME}-linux-musl-arm64.tar.gz" "${APP_NAME}-linux-musl-arm64"
@@ -412,6 +456,17 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: 交叉编译 cfdata (freebsd/amd64)
+        # 上游未发布 FreeBSD 二进制, 在宿主 x86_64 上交叉编译后随 rsync 同步进虚拟机
+        run: |
+          git clone --depth 1 --branch "$CFDATA_REF" "https://github.com/${CFDATA_REPO}.git" /tmp/cfdata-src
+          cd /tmp/cfdata-src
+          CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o cfdata .
+          mkdir -p bundle && cp cfdata bundle/cfdata && chmod +x bundle/cfdata
+          ls -la bundle/
       - name: FreeBSD 虚拟机内构建
         uses: vmactions/freebsd-vm@v1
         with:
@@ -428,8 +483,10 @@ jobs:
             # FreeBSD 无 manylinux wheel, pip 需匹配当前 python 版本; 找不到时回退 ensurepip
             pkg install -y "py${VER}-pip" 2>/dev/null || $PY -m ensurepip --upgrade 2>/dev/null || true
             $PY -m pip install --upgrade pyinstaller
+            EXTRA=""
+            if [ -f bundle/cfdata ]; then EXTRA="--add-binary bundle/cfdata:."; fi
             $PY -m PyInstaller --onefile --clean --noconfirm \
-              --name cfdata-web-manager-freebsd-amd64 --add-data "web:web" app.py
+              --name cfdata-web-manager-freebsd-amd64 --add-data "web:web" $EXTRA app.py
             cd dist && tar czf cfdata-web-manager-freebsd-amd64.tar.gz cfdata-web-manager-freebsd-amd64
       - uses: actions/upload-artifact@v4
         with:
@@ -465,7 +522,7 @@ jobs:
             echo "## ${APP_NAME} 多平台二进制 (自动构建)"
             echo ""
             echo "- 构建来源: ${GITHUB_REPOSITORY} @ \`${GITHUB_SHA:0:7}\`"
-            echo "- 主流平台已内嵌官方 [${CFDATA_REPO}](https://github.com/${CFDATA_REPO}) 同架构 cfdata, 下载即用"
+            echo "- 所有平台均已内嵌 [${CFDATA_REPO}](https://github.com/${CFDATA_REPO}) 同版本 cfdata (${CFDATA_REF}): 官方 6 平台用仓库预置二进制, windows-x86/linux-armv7/freebsd-amd64 由 CI 从 GPL-3.0 源码交叉编译, 下载即用, 无需另行获取"
             echo ""
             echo "| 产物 | 大小 |"
             echo "| --- | --- |"
@@ -482,6 +539,10 @@ jobs:
             echo "- 运行后浏览器访问 http://127.0.0.1:8088/ ; 配置与结果保存在可执行文件同目录"
             echo ""
             echo "校验: 下载 SHA256SUMS.txt 后执行 \`sha256sum -c SHA256SUMS.txt\`"
+            echo ""
+            echo "### 第三方组件许可"
+            echo ""
+            echo "- 内嵌的 cfdata 二进制来自 [${CFDATA_REPO}](https://github.com/${CFDATA_REPO}), 采用 **GPL-3.0** 许可; 对应源代码见 <https://github.com/${CFDATA_REPO}/tree/${CFDATA_REF}>。本程序以独立子进程方式调用 cfdata, 不构成对其源代码的派生或链接。"
             if [ "$HAS_GPG_KEY" = "true" ]; then
               echo "GPG 签名: SHA256SUMS.txt.asc (\`gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt\`)"
             fi
