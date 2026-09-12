@@ -908,7 +908,7 @@ class HistoryPool:
                 'url': '(节点池 %d 个节点 · 本地文件)' % count,
                 'enabled': True, 'is_history': True, 'pool_size': count}
 
-    def export_input_file(self, path):
+    def export_input_file(self, route):
         """把池内全部节点导出为 ip:port 文本(每行一个), 供 cfdata -nsbfile 复测"""
         with self._lock:
             keys = sorted(self._nodes.keys())
@@ -3107,6 +3107,28 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 静默访问日志
 
+    # ---- 部署子路径(后缀)支持 ----
+    @staticmethod
+    def _strip_prefix(path):
+        """支持在任意子路径(后缀)下部署, 如 /cf-data/、/cf-data-ipv4/、/CF-Data-ipv6/ ...
+
+        剥离 URL 第一段(若该段不是已知根级路由首段)后用剩余部分做路由匹配:
+            /cf-data/api/state   -> /api/state
+            /CF-Data-ipv6/       -> /            (页面)
+            /api/state           -> /api/state   (无后缀, 向前兼容)
+        所有列出/未列出的后缀均生效; 根路径 / 与 /index.html 保持不变。
+        """
+        if path in ('/', '/index.html', ''):
+            return path or '/'
+        parts = [p for p in path.split('/') if p]
+        if not parts:
+            return '/'
+        # 首段是根级路由时不剥离(否则会误删 /api /index.html)
+        if parts[0] in ('api', 'index.html'):
+            return path
+        rest = '/' + '/'.join(parts[1:])
+        return rest or '/'
+
     # ---- 访问控制(可选, 默认关闭) ----
     def _authorized(self):
         """Basic 认证校验; 未启用时直接放行"""
@@ -3185,12 +3207,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        route = self._strip_prefix(path)
         qs = parse_qs(parsed.query)
         try:
             # 启用鉴权时, 仅订阅下载路径接受 ?token= 免密码访问(便于 Clash 等客户端拉取)
-            if not self._require_auth(qs if path.startswith('/api/download/') else None):
+            if not self._require_auth(qs if route.startswith('/api/download/') else None):
                 return
-            if path in ('/', '/index.html'):
+            if route in ('/', '/index.html'):
                 body = read_web_asset('index.html')
                 if body is None:
                     self._json({'ok': False, 'error': 'web/index.html 缺失'}, 500)
@@ -3204,15 +3227,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
-            if path == '/api/state':
+            if route == '/api/state':
                 self._json({'ok': True, 'data': api_state()})
                 return
 
-            if path == '/api/sources':
+            if route == '/api/sources':
                 self._json({'ok': True, 'data': STORE.get().get('sources', [])})
                 return
 
-            if path == '/api/history':
+            if route == '/api/history':
                 self._json({'ok': True, 'data': {
                     'nodes': HISTORY.list_nodes(),
                     'stats': HISTORY.stats(),
@@ -3220,11 +3243,11 @@ class Handler(BaseHTTPRequestHandler):
                 }})
                 return
 
-            if path == '/api/settings':
+            if route == '/api/settings':
                 self._json({'ok': True, 'data': STORE.get().get('settings', {})})
                 return
 
-            if path == '/api/status':
+            if route == '/api/status':
                 after = int((qs.get('after') or ['0'])[0])
                 lines = RUNNER.log.read(after)
                 snap = RUNNER.snapshot()
@@ -3245,7 +3268,7 @@ class Handler(BaseHTTPRequestHandler):
                 }})
                 return
 
-            if path == '/api/runs':
+            if route == '/api/runs':
                 runs = load_runs()
                 slim = [{k: r.get(k) for k in
                          ('id', 'trigger', 'started_at', 'finished_at', 'status',
@@ -3253,23 +3276,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'ok': True, 'data': slim})
                 return
 
-            if path == '/api/latest':
+            if route == '/api/latest':
                 data = load_latest_meta()
                 self._json({'ok': True, 'data': data})
                 return
 
-            if path == '/api/qa':
+            if route == '/api/qa':
                 self._json({'ok': True, 'data': {
                     'records': load_qa_runs()[:20],
                     'cron': _cron_block(STORE.get().get('qa_cron', {})),
                 }})
                 return
 
-            if path == '/api/sub_template':
+            if route == '/api/sub_template':
                 self._json({'ok': True, 'data': sub_template_status()})
                 return
 
-            m = re.fullmatch(r'/api/runs/([\w.:-]+)', path)
+            m = re.fullmatch(r'/api/runs/([\w.:-]+)', route)
             if m:
                 rec = load_run_record(m.group(1))
                 if not rec:
@@ -3288,7 +3311,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'ok': True, 'data': rec})
                 return
 
-            m = re.fullmatch(r'/api/download/([\w.:-]+)/([\w.-]+)', path)
+            m = re.fullmatch(r'/api/download/([\w.:-]+)/([\w.-]+)', route)
             if m:
                 run_id, fname = m.group(1), m.group(2)
                 run_dir = os.path.join(RESULTS_DIR, run_id)
@@ -3302,7 +3325,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._file(fp, download_name=dl_name, mime=mime)
                 return
 
-            if path == '/api/binary':
+            if route == '/api/binary':
                 b = RUNNER.locate_binary()
                 self._json({'ok': True, 'data': {'path': b or '', 'found': b is not None}})
                 return
@@ -3316,18 +3339,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        route = self._strip_prefix(path)
         body = self._body()  # 先消费请求体, 避免 401 时残留数据污染后续请求
         try:
             if not self._require_auth():  # 写操作一律需要认证(令牌仅用于下载)
                 return
-            if path == '/api/sources':
+            if route == '/api/sources':
                 try:
                     src = STORE.add_source(body.get('name', ''), body.get('url', ''),
                                            bool(body.get('enabled', True)))
                 except ValueError as e:
                     return self._json({'ok': False, 'error': str(e)}, 400)
                 return self._json({'ok': True, 'data': src})
-            m = re.fullmatch(r'/api/sources/([\w.:-]+)', path)
+            m = re.fullmatch(r'/api/sources/([\w.:-]+)', route)
             if m:
                 try:
                     src = STORE.update_source(m.group(1), body)
@@ -3337,12 +3361,12 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json({'ok': False, 'error': str(e)}, 400)
 
-            if path == '/api/settings':
+            if route == '/api/settings':
                 patch = {'settings': body}
                 STORE.update(patch)
                 return self._json({'ok': True, 'data': STORE.get().get('settings', {})})
 
-            if path == '/api/cron':
+            if route == '/api/cron':
                 expr = (body.get('expr') or '').strip()
                 enabled = bool(body.get('enabled'))
                 if enabled:
@@ -3354,15 +3378,15 @@ class Handler(BaseHTTPRequestHandler):
                 SCHEDULER.next_runs(3, force_refresh=True)
                 return self._json({'ok': True, 'data': api_state()['cron']})
 
-            if path == '/api/run':
+            if route == '/api/run':
                 ok, msg = RUNNER.start(trigger='manual')
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
 
-            if path == '/api/qa':
+            if route == '/api/qa':
                 ok, msg = RUNNER.start_qa(trigger='manual')
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
 
-            if path == '/api/sub_template/refresh':
+            if route == '/api/sub_template/refresh':
                 # 支持携带页面表单值: 填好模板设置后直接点刷新即可生效,
                 # 无需先点「保存设置」(收到的值先持久化, 再用最新配置刷新)
                 patch = {}
@@ -3378,7 +3402,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'ok': ok, 'message': msg,
                                    'data': sub_template_status()}, 200 if ok else 400)
 
-            if path == '/api/qa_cron':
+            if route == '/api/qa_cron':
                 expr = (body.get('expr') or '').strip()
                 enabled = bool(body.get('enabled'))
                 if enabled:
@@ -3389,7 +3413,7 @@ class Handler(BaseHTTPRequestHandler):
                 STORE.update({'qa_cron': {'enabled': enabled, 'expr': expr}})
                 return self._json({'ok': True, 'data': _cron_block(STORE.get().get('qa_cron', {}))})
 
-            if path == '/api/cancel':
+            if route == '/api/cancel':
                 ok, msg = RUNNER.cancel()
                 return self._json({'ok': ok, 'message': msg}, 200 if ok else 409)
 
@@ -3403,13 +3427,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        route = self._strip_prefix(parsed.path)
         # 删除操作(清历史池/删源)必须鉴权, 否则任何人都能清空你的节点池
         if not self._require_auth():
             return
-        if parsed.path == '/api/history':
+        if route == '/api/history':
             HISTORY.clear()
             return self._json({'ok': True})
-        m = re.fullmatch(r'/api/sources/([\w.:-]+)', parsed.path)
+        m = re.fullmatch(r'/api/sources/([\w.:-]+)', route)
         if not m:
             return self._json({'ok': False, 'error': '接口不存在'}, 404)
         try:

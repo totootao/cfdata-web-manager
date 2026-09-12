@@ -42,6 +42,13 @@ python3 app.py --port 8088
 | `--host` | `0.0.0.0` | 监听地址 |
 | `--port` | `8088` | 监听端口 |
 
+> **子路径（后缀）部署**：服务零配置支持任意 URL 子路径访问，适合同端口多实例、反向代理，或 Docker 直接加路径访问。在访问地址后追加任意路径段即可，前端会自动拼接该前缀：
+> - `http://服务器IP:8088/cf-data/`
+> - `http://服务器IP:8088/cf-data-ipv4/`、`/cf-data-ipv6/`
+> - `http://服务器IP:8088/CF-Data/`、`/CF-Data-ipv4/`、`/CF-Data-ipv6/`
+>
+> 加任意后缀（名字随意）都行，页面、所有 API、以及下载/订阅链接都会自动适配；原有的根路径 `http://服务器IP:8088/` 也照常工作。反向代理场景（Nginx 把 `/cf-data` 转发到容器 `/`）同样兼容。
+
 ## 多平台二进制（预编译版，免装 Python）
 
 由 GitHub Actions 自动构建（[workflow](.github/workflows/build-binaries.yml)），从 [Releases](https://github.com/totootao/cfdata-web-manager/releases/tag/binaries) 或 Actions 构建产物下载：
@@ -139,6 +146,8 @@ results/latest/
 - `http://服务器IP:8088/api/download/latest/all_sorted_v6.txt`
 - `http://服务器IP:8088/api/download/latest/top_by_source.txt`
 - `http://服务器IP:8088/api/download/latest/top_by_source.yaml`
+
+> 若以子路径（后缀）部署（如 `/cf-data`），上述链接需加上对应前缀，例如 `http://服务器IP:8088/cf-data/api/download/latest/top_nodes.yaml`；页面内「最新结果」卡片的下载/复制按钮已自动带上前缀，无需手动拼接。
 
 「运行结果」页顶部的「最新结果」卡片提供一键下载与复制订阅链接（v4 / v6 分开复制）。
 

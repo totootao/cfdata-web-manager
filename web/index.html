@@ -497,8 +497,15 @@ function toast(msg, ok=true){
   t.textContent = msg; t.className = 'toast show ' + (ok?'ok':'err');
   clearTimeout(t._h); t._h = setTimeout(()=>t.className='toast', 3000);
 }
+// 部署子路径(后缀)前缀: 从当前页面路径推断, 例如 /cf-data/、/cf-data-ipv4/、/CF-Data-ipv6/
+// 部署在根路径(ip:port/)时为空串, 行为与原来完全一致
+const APP_PREFIX = (()=>{
+  const seg = location.pathname.split('/').filter(Boolean);
+  if(seg.length && seg[0] !== 'api' && seg[0] !== 'index.html') return '/' + seg[0];
+  return '';
+})();
 async function api(path, opts={}){
-  const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
+  const r = await fetch(APP_PREFIX + path, {headers:{'Content-Type':'application/json'}, ...opts});
   const j = await r.json().catch(()=>({ok:false,error:'响应解析失败'}));
   if(!j.ok && j.error) throw new Error(j.error);
   return j;
@@ -935,11 +942,11 @@ async function loadLatest(){
     const d = j.data;
     if(!d){ box.innerHTML='<div class="empty">暂无最新结果，请先运行任务</div>'; return }
     const tr = d.trigger==='cron'?'定时':'手动';
-    const subYaml = location.origin+'/api/download/latest/top_nodes.yaml';
-    const subTxt  = location.origin+'/api/download/latest/top_nodes.txt';
-    const subV6Y  = location.origin+'/api/download/latest/top_nodes_v6.yaml';
-    const subV6T  = location.origin+'/api/download/latest/top_nodes_v6.txt';
-    const subByY  = location.origin+'/api/download/latest/top_by_source.yaml';
+    const subYaml = location.origin+APP_PREFIX+'/api/download/latest/top_nodes.yaml';
+    const subTxt  = location.origin+APP_PREFIX+'/api/download/latest/top_nodes.txt';
+    const subV6Y  = location.origin+APP_PREFIX+'/api/download/latest/top_nodes_v6.yaml';
+    const subV6T  = location.origin+APP_PREFIX+'/api/download/latest/top_nodes_v6.txt';
+    const subByY  = location.origin+APP_PREFIX+'/api/download/latest/top_by_source.yaml';
     const ex = d.exists||{};
     const conv = d.sub_converted||[];
     const v4sub = conv.includes('top_nodes.yaml');
@@ -960,14 +967,14 @@ async function loadLatest(){
           <span>提取 IPv6: <b style="color:var(--accent)">${d.top_v6_count??'-'}</b></span>
         </div>
         <div class="meta" style="margin-top:6px">
-          ${ex.txt?`<a class="dl" href="/api/download/latest/top_nodes.txt">⬇ TXT(v4)</a>`:''}
-          ${ex.yaml?`<a class="dl" href="/api/download/latest/top_nodes.yaml">⬇ YAML(v4)${v4sub?' · 完整订阅':''}</a>`:''}
-          ${ex.all?`<a class="dl" href="/api/download/latest/all_sorted.txt">⬇ 全量(v4)</a>`:''}
-          ${ex.v6_txt?`<a class="dl" href="/api/download/latest/top_nodes_v6.txt">⬇ TXT(v6)</a>`:''}
-          ${ex.v6_yaml?`<a class="dl" href="/api/download/latest/top_nodes_v6.yaml">⬇ YAML(v6)${v6sub?' · 完整订阅':''}</a>`:''}
-          ${ex.v6_all?`<a class="dl" href="/api/download/latest/all_sorted_v6.txt">⬇ 全量(v6)</a>`:''}
-          ${ex.by_source?`<a class="dl" href="/api/download/latest/top_by_source.txt">⬇ 分源Top${d.per_source_count??5}</a>`:''}
-          ${ex.by_source_yaml?`<a class="dl" href="/api/download/latest/top_by_source.yaml">⬇ 分源YAML</a>`:''}
+          ${ex.txt?`<a class="dl" href="${APP_PREFIX}/api/download/latest/top_nodes.txt">⬇ TXT(v4)</a>`:''}
+          ${ex.yaml?`<a class="dl" href="${APP_PREFIX}/api/download/latest/top_nodes.yaml">⬇ YAML(v4)${v4sub?' · 完整订阅':''}</a>`:''}
+          ${ex.all?`<a class="dl" href="${APP_PREFIX}/api/download/latest/all_sorted.txt">⬇ 全量(v4)</a>`:''}
+          ${ex.v6_txt?`<a class="dl" href="${APP_PREFIX}/api/download/latest/top_nodes_v6.txt">⬇ TXT(v6)</a>`:''}
+          ${ex.v6_yaml?`<a class="dl" href="${APP_PREFIX}/api/download/latest/top_nodes_v6.yaml">⬇ YAML(v6)${v6sub?' · 完整订阅':''}</a>`:''}
+          ${ex.v6_all?`<a class="dl" href="${APP_PREFIX}/api/download/latest/all_sorted_v6.txt">⬇ 全量(v6)</a>`:''}
+          ${ex.by_source?`<a class="dl" href="${APP_PREFIX}/api/download/latest/top_by_source.txt">⬇ 分源Top${d.per_source_count??5}</a>`:''}
+          ${ex.by_source_yaml?`<a class="dl" href="${APP_PREFIX}/api/download/latest/top_by_source.yaml">⬇ 分源YAML</a>`:''}
         </div>
         <div class="meta" style="margin-top:4px">
           ${ex.yaml?`<a class="dl" onclick="copyText('${subYaml}','IPv4 订阅链接')">📋 复制 v4 订阅</a>`:''}
@@ -1004,13 +1011,13 @@ async function loadRuns(){
           <span>源结果总数: <b style="color:var(--text)">${r.total_nodes??'-'}</b></span>
           <span>提取 v4: <b style="color:var(--cyan)">${r.top_count??'-'}</b></span>
           ${(r.top_v6_count??0)>0?`<span>提取 v6: <b style="color:var(--accent)">${r.top_v6_count}</b></span>`:''}
-          ${r.files?`<a class="dl" href="/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT(v4)</a>
-          <a class="dl" href="/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML(v4)</a>
-          <a class="dl" href="/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量(v4)</a>
-          ${r.files.v6_txt?`<a class="dl" href="/api/download/${r.id}/${r.files.v6_txt}" onclick="event.stopPropagation()">⬇ TXT(v6)</a>`:''}
-          ${r.files.v6_yaml?`<a class="dl" href="/api/download/${r.id}/${r.files.v6_yaml}" onclick="event.stopPropagation()">⬇ YAML(v6)</a>`:''}
-          ${r.files.by_source?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source}" onclick="event.stopPropagation()">⬇ 分源</a>`:''}
-          ${r.files.by_source_yaml?`<a class="dl" href="/api/download/${r.id}/${r.files.by_source_yaml}" onclick="event.stopPropagation()">⬇ 分源YAML</a>`:''}`:''}
+          ${r.files?`<a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.txt}" onclick="event.stopPropagation()">⬇ TXT(v4)</a>
+          <a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.yaml}" onclick="event.stopPropagation()">⬇ YAML(v4)</a>
+          <a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.all}" onclick="event.stopPropagation()">⬇ 全量(v4)</a>
+          ${r.files.v6_txt?`<a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.v6_txt}" onclick="event.stopPropagation()">⬇ TXT(v6)</a>`:''}
+          ${r.files.v6_yaml?`<a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.v6_yaml}" onclick="event.stopPropagation()">⬇ YAML(v6)</a>`:''}
+          ${r.files.by_source?`<a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.by_source}" onclick="event.stopPropagation()">⬇ 分源</a>`:''}
+          ${r.files.by_source_yaml?`<a class="dl" href="${APP_PREFIX}/api/download/${r.id}/${r.files.by_source_yaml}" onclick="event.stopPropagation()">⬇ 分源YAML</a>`:''}`:''}
         </div>
       </div>`;
     }).join('');
